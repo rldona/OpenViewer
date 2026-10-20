@@ -31,7 +31,7 @@ final class InfoViewController: UITableViewController {
         }
     }
 
-    private static func buildSections(item: ImageItem, url: URL) -> [(title: String, rows: [(String, String)])] {
+    static func buildSections(item: ImageItem, url: URL) -> [(title: String, rows: [(String, String)])] {
         var file: [(String, String)] = [
             ("Name", item.name),
             ("Folder", url.deletingLastPathComponent().lastPathComponent),
@@ -87,5 +87,78 @@ final class InfoViewController: UITableViewController {
         content.prefersSideBySideTextAndSecondaryText = true
         cell.contentConfiguration = content
         return cell
+    }
+}
+
+/// Floating glass card beside the image with the same details as the info sheet. It refreshes
+/// as you page, without covering the image or needing to be reopened.
+final class InfoPanelView: GlassView {
+    private let stack = UIStackView()
+    private var loadingURL: URL?
+
+    init() {
+        super.init(cornerRadius: 22)
+        stack.axis = .vertical
+        stack.spacing = 0
+        embed(stack, insets: NSDirectionalEdgeInsets(top: 14, leading: 18, bottom: 10, trailing: 18))
+        widthAnchor.constraint(equalToConstant: 280).isActive = true
+        accessibilityLabel = "Image info"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ item: ImageItem) {
+        loadingURL = item.url
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let sections = InfoViewController.buildSections(item: item, url: item.url)
+            DispatchQueue.main.async {
+                guard let self, self.loadingURL == item.url else { return }
+                self.render(sections)
+            }
+        }
+    }
+
+    private func render(_ sections: [(title: String, rows: [(String, String)])]) {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for (index, section) in sections.enumerated() {
+            let header = UILabel()
+            header.text = section.title
+            header.font = .systemFont(ofSize: 15, weight: .bold)
+            stack.addArrangedSubview(header)
+            stack.setCustomSpacing(8, after: header)
+            for row in section.rows {
+                stack.addArrangedSubview(makeRow(row.0, row.1))
+            }
+            if index < sections.count - 1, let last = stack.arrangedSubviews.last {
+                stack.setCustomSpacing(16, after: last)
+            }
+        }
+    }
+
+    private func makeRow(_ key: String, _ value: String) -> UIView {
+        let keyLabel = UILabel()
+        keyLabel.text = key
+        keyLabel.font = .preferredFont(forTextStyle: .footnote)
+        keyLabel.textColor = .secondaryLabel
+        keyLabel.setContentHuggingPriority(.required, for: .horizontal)
+        keyLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let valueLabel = UILabel()
+        valueLabel.text = value
+        valueLabel.font = .preferredFont(forTextStyle: .footnote)
+        valueLabel.textAlignment = .right
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        let row = UIStackView(arrangedSubviews: [keyLabel, valueLabel])
+        row.spacing = 12
+        let separator = UIView()
+        separator.backgroundColor = UIColor(white: 1, alpha: 0.08)
+        separator.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        let container = UIStackView(arrangedSubviews: [separator, row])
+        container.axis = .vertical
+        container.spacing = 7
+        container.isLayoutMarginsRelativeArrangement = true
+        container.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 7, trailing: 0)
+        container.isAccessibilityElement = true
+        container.accessibilityLabel = "\(key): \(value)"
+        return container
     }
 }

@@ -23,12 +23,11 @@ behind the design.
 - **Dark gallery look** with floating glass controls (Liquid Glass on iPadOS 26), or match the system appearance.
 - **Folder browsing** with mosaic covers (up to four images from inside each folder) and item counts, an option to hide folders that contain no images anywhere inside, or **Include Subfolders** to flatten the whole tree into one grid. The tree is scanned in the background and results stream in as they are found. Sorted by name, the images are grouped under a header per subfolder, and a fast-scroll handle on the right edge jumps anywhere while showing which folder you are in.
 - **Justified grid** like Google Photos, where every image keeps its proportions, or a square grid. Pinch or press ⌘+ / ⌘− to resize, sort by natural name, date or size, and filter by name.
-- **Full-screen viewer**: swipe between images, double-tap or pinch to zoom, zoom transition from the grid, and swipe down to close.
+- **Full-screen viewer**: swipe between images, double-tap or pinch to zoom, zoom transition from the grid, and swipe down to close. Tap the image for floating controls: a **filmstrip** of thumbnails to jump to any image (plus a slider for big jumps in long collections) and an **info card** beside the image that follows you as you page.
 - **Favorites**: tap ♥︎ in the viewer, press F, or long-press a thumbnail. Filter any folder with *Favorites Only*, or open *Favorites* on the start screen to see favorites from all your folders. Folders can be favorited too (long-press a folder, or *Add Folder to Favorites* in the menu) and appear as shortcuts on the start screen. Favorites are stored inside the app and image files are never modified.
 - **Select multiple images** like in Google Photos: long-press an image and, without lifting your finger, drag across or down to select a whole range (the grid scrolls by itself near the edges). You can also tap *Select* and then tap or swipe sideways. Share them, add or remove favorites, put them in a new folder, copy or move them anywhere the Files app can reach, or delete them (after a confirmation, they go to Recently Deleted in the Files app when the location supports it). ⌘A selects everything.
 - **Compare two images**: select two and tap *Compare*. *Overlay* places B over A with an opacity slider, *Swipe* adds a draggable divider, and *Side by Side* keeps zoom and pan in sync. It is ideal for checking a scene's art against its collision map. Space flips between A and B, 1/2/3 switch modes and X swaps them.
 - **Made for sprites and extracted assets**: choose a checkerboard, gray, black or white background for transparent images (*Transparency* in the menu, or B in the viewer), and hide tiny files with *Image Size* (for example, everything under 64 px).
-- **Scrubber** to jump anywhere in collections with thousands of images.
 - **Slideshow** at 2, 3, 5 or 10 seconds (long-press the play button).
 - **Animated GIF** playback, an **EXIF info** panel, Share, and multi-window / Stage Manager support.
 - **Keyboard**: ← → / space to move, Home / End, Esc to close, I for info, F to favorite, B to change the transparency background, S for slideshow, H to hide controls, ⌘O to open a folder, ⌘R to include subfolders, ⌘F to search.
@@ -78,7 +77,6 @@ docs/MARKET_STUDY.md
 ## Roadmap
 
 - On-demand download of iCloud files that are not stored locally
-- Filmstrip view
 - Ratings and tags stored separately (files are never modified)
 - ZIP/CBZ support
 - External display output

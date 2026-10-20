@@ -35,7 +35,7 @@ enum Appearance: String, CaseIterable {
 
 /// A floating capsule or rounded panel of glass for controls drawn over content.
 /// The effect is applied only to these few bars, never per thumbnail, so its cost stays constant.
-final class GlassView: UIVisualEffectView {
+class GlassView: UIVisualEffectView {
     private let capsule: Bool
     private let radius: CGFloat
 

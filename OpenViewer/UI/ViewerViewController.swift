@@ -12,11 +12,16 @@ final class ViewerViewController: UIViewController {
     private let topBar = PassthroughView()
     private let titleCapsule = GlassView()
     private let actionsCapsule = GlassView()
-    private let bottomBar = GlassView()
+    private let bottomBar = GlassView(cornerRadius: 22)
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
     private let counterLabel = UILabel()
     private let scrubber = UISlider()
+    private lazy var filmstrip = FilmstripView(items: items)
+    private let infoPanel = InfoPanelView()
+    private var infoVisible = UserDefaults.standard.bool(forKey: "viewerInfoVisible")
+    /// Collections this long also get a slider for big jumps above the filmstrip.
+    private let scrubberThreshold = 200
     private let playButton = UIButton(type: .system)
     private let infoButton = UIButton(type: .system)
     private let shareButton = UIButton(type: .system)
@@ -63,6 +68,7 @@ final class ViewerViewController: UIViewController {
         pageController.delegate = self
 
         setupChrome()
+        if infoVisible { applyInfoVisibility(animated: false) }
         topBar.alpha = 0
         bottomBar.alpha = 0
         if !items.isEmpty {
@@ -138,11 +144,23 @@ final class ViewerViewController: UIViewController {
         scrubber.minimumTrackTintColor = Theme.accent
         scrubber.addTarget(self, action: #selector(scrubbed), for: .valueChanged)
         scrubber.accessibilityLabel = "Position"
-        let bottomStack = UIStackView(arrangedSubviews: [scrubber, counterLabel])
-        bottomStack.spacing = 16
-        bottomStack.alignment = .center
-        bottomBar.embed(bottomStack, insets: NSDirectionalEdgeInsets(top: 10, leading: 22, bottom: 10, trailing: 22))
+        filmstrip.onSelect = { [weak self] index in
+            self?.stopSlideshow()
+            self?.go(to: index, animated: false)
+        }
+        let stripRow = UIStackView(arrangedSubviews: [filmstrip, counterLabel])
+        stripRow.spacing = 14
+        stripRow.alignment = .center
+        let bottomStack = UIStackView(arrangedSubviews: [scrubber, stripRow])
+        bottomStack.axis = .vertical
+        bottomStack.spacing = 4
+        scrubber.isHidden = items.count < scrubberThreshold
+        bottomBar.embed(bottomStack, insets: NSDirectionalEdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 18))
         bottomBar.isHidden = items.count < 2
+        bottomBar.layer.cornerRadius = 22
+
+        infoPanel.translatesAutoresizingMaskIntoConstraints = false
+        infoPanel.isHidden = true
 
         favoriteHUD.image = UIImage(systemName: "heart.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 72, weight: .medium))
         favoriteHUD.tintColor = .white
@@ -175,6 +193,7 @@ final class ViewerViewController: UIViewController {
 
         view.addSubview(topBar)
         view.addSubview(bottomBar)
+        view.addSubview(infoPanel)
         let guide = view.safeAreaLayoutGuide
         let bottomWidth = bottomBar.widthAnchor.constraint(equalToConstant: 900)
         bottomWidth.priority = .defaultHigh
@@ -194,6 +213,10 @@ final class ViewerViewController: UIViewController {
             bottomBar.leadingAnchor.constraint(greaterThanOrEqualTo: guide.leadingAnchor, constant: 24),
             bottomBar.trailingAnchor.constraint(lessThanOrEqualTo: guide.trailingAnchor, constant: -24),
             bottomWidth,
+
+            infoPanel.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 12),
+            infoPanel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            infoPanel.bottomAnchor.constraint(lessThanOrEqualTo: bottomBar.topAnchor, constant: -12),
         ])
     }
 
@@ -214,6 +237,7 @@ final class ViewerViewController: UIViewController {
         UIView.animate(withDuration: 0.2) {
             self.topBar.alpha = hidden ? 0 : 1
             self.bottomBar.alpha = hidden ? 0 : 1
+            self.infoPanel.alpha = hidden ? 0 : 1
         }
         setNeedsUpdateOfHomeIndicatorAutoHidden()
     }
@@ -248,6 +272,8 @@ final class ViewerViewController: UIViewController {
         subtitleLabel.text = item.url.deletingLastPathComponent().lastPathComponent
         counterLabel.text = "\((currentIndex + 1).formatted()) / \(items.count.formatted())"
         if !scrubber.isTracking { scrubber.value = Float(currentIndex) }
+        filmstrip.select(currentIndex, animated: true)
+        if infoVisible { infoPanel.show(item) }
         updateFavoriteButton()
         preloadNeighbours()
     }
@@ -359,15 +385,24 @@ final class ViewerViewController: UIViewController {
         }
     }
 
+    /// Toggles the floating info card; the choice is remembered.
     @objc private func showInfo() {
         guard !items.isEmpty else { return }
-        stopSlideshow()
-        let info = InfoViewController(item: items[currentIndex])
-        let navigation = UINavigationController(rootViewController: info)
-        navigation.modalPresentationStyle = .popover
-        navigation.popoverPresentationController?.sourceView = infoButton
-        navigation.preferredContentSize = CGSize(width: 360, height: 480)
-        present(navigation, animated: true)
+        infoVisible.toggle()
+        UserDefaults.standard.set(infoVisible, forKey: "viewerInfoVisible")
+        applyInfoVisibility(animated: true)
+    }
+
+    private func applyInfoVisibility(animated: Bool) {
+        infoButton.backgroundColor = infoVisible ? UIColor(white: 1, alpha: 0.2) : .clear
+        infoButton.layer.cornerRadius = 22
+        infoButton.accessibilityTraits = infoVisible ? [.button, .selected] : .button
+        if infoVisible {
+            infoPanel.show(items[currentIndex])
+            setChromeHidden(false)
+        }
+        let changes = { self.infoPanel.isHidden = !self.infoVisible }
+        animated ? UIView.transition(with: infoPanel, duration: 0.2, options: .transitionCrossDissolve, animations: changes) : changes()
     }
 
     @objc private func share() {
