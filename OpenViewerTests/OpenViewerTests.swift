@@ -137,6 +137,14 @@ final class OpenViewerTests: XCTestCase {
         XCTAssertEqual(background, .checkerboard)
     }
 
+    func testEmptyFolderDetection() throws {
+        let emptyTree = root.appendingPathComponent("empty/nested/deeper")
+        try FileManager.default.createDirectory(at: emptyTree, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: emptyTree.appendingPathComponent("readme.txt"))
+        XCTAssertFalse(FolderInfoCache.containsImage(in: root.appendingPathComponent("empty")))
+        XCTAssertTrue(FolderInfoCache.containsImage(in: root.appendingPathComponent("a")), "big.png is two levels down")
+    }
+
     func testThumbnailBuckets() {
         XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 100), 256)
         XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 300), 512)

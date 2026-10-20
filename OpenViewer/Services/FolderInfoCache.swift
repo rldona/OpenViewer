@@ -6,6 +6,8 @@ final class FolderInfoCache {
         let imageCount: Int
         let folderCount: Int
         let cover: ImageItem?
+        /// Whether any image exists anywhere below this folder.
+        let containsImages: Bool
 
         var subtitle: String {
             var parts: [String] = []
@@ -47,7 +49,20 @@ final class FolderInfoCache {
     private static func compute(_ url: URL) -> Info {
         let listing = FolderScanner.list(url)
         let cover = firstImage(in: listing) ?? deepCover(in: listing.folders, depth: 3)
-        return Info(imageCount: listing.images.count, folderCount: listing.folders.count, cover: cover)
+        let containsImages = cover != nil || listing.folders.contains { containsImage(in: $0.url) }
+        return Info(imageCount: listing.images.count, folderCount: listing.folders.count, cover: cover,
+                    containsImages: containsImages)
+    }
+
+    /// Walks the tree lazily and stops at the first image, so only truly empty trees are walked in full.
+    static func containsImage(in url: URL) -> Bool {
+        guard let enumerator = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return false }
+        for case let entry as URL in enumerator where ImageTypes.isImage(entry) {
+            return true
+        }
+        return false
     }
 
     private static func firstImage(in listing: FolderScanner.Listing) -> ImageItem? {

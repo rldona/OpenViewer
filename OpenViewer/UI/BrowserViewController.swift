@@ -41,6 +41,9 @@ final class BrowserViewController: UIViewController {
     /// `images[i] == baseImages[sourceIndices[i]]`, so visible items can be prioritised by the resolver.
     private var sourceIndices: [Int] = []
     private var hiddenSmallCount = 0
+    private var hiddenEmptyFolderCount = 0
+    private var hideEmptyFolders = Settings.hideEmptyFolders
+    private var folderRefilterScheduled = false
     /// Filtering runs here so huge lists never block the main thread.
     private let filterQueue = DispatchQueue(label: "openviewer.filter", qos: .userInitiated)
     private var filterGeneration = 0
@@ -52,6 +55,8 @@ final class BrowserViewController: UIViewController {
     private var prefetchTokens: [IndexPath: LoadToken] = [:]
     private var menuButton: UIBarButtonItem!
     private var normalRightItems: [UIBarButtonItem] = []
+    private var slideshowButton: UIBarButtonItem!
+    private var selectButton: UIBarButtonItem!
 
     // Selection mode
     private(set) var isSelecting = false
@@ -65,6 +70,8 @@ final class BrowserViewController: UIViewController {
     private var pendingExport: (sources: [URL], isMove: Bool)?
     /// Photos-style swipe selection: a horizontal drag selects (or deselects) the range it covers.
     private let selectionPan = UIPanGestureRecognizer()
+    /// Google Photos-style: long-press an image to start selecting, then keep the finger down and drag.
+    private let selectionLongPress = UILongPressGestureRecognizer()
     private var dragSelection: (start: Int, last: Int, selecting: Bool, original: Set<URL>)?
     private var autoScrollLink: CADisplayLink?
     private var autoScrollSpeed: CGFloat = 0
@@ -111,7 +118,8 @@ final class BrowserViewController: UIViewController {
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.prefetchDataSource = self
-        collectionView.dragDelegate = self
+        // Long press is used for selection, which would conflict with lifting items to drag them.
+        collectionView.dragInteractionEnabled = false
         collectionView.keyboardDismissMode = .onDrag
         collectionView.register(ThumbnailCell.self, forCellWithReuseIdentifier: ThumbnailCell.reuseID)
         collectionView.register(FolderCell.self, forCellWithReuseIdentifier: FolderCell.reuseID)
@@ -135,15 +143,19 @@ final class BrowserViewController: UIViewController {
 
         menuButton = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMenu())
         menuButton.accessibilityLabel = "View Options"
-        let slideshow = UIBarButtonItem(image: UIImage(systemName: "play.rectangle"), style: .plain,
+        slideshowButton = UIBarButtonItem(image: UIImage(systemName: "play.rectangle"), style: .plain,
                                         target: self, action: #selector(startSlideshow))
-        slideshow.accessibilityLabel = "Slideshow"
-        let select = UIBarButtonItem(title: "Select", style: .plain, target: self, action: #selector(enterSelection))
-        normalRightItems = [menuButton, slideshow, select]
+        slideshowButton.accessibilityLabel = "Slideshow"
+        selectButton = UIBarButtonItem(title: "Select", style: .plain, target: self, action: #selector(enterSelection))
+        normalRightItems = [menuButton, slideshowButton, selectButton]
         navigationItem.rightBarButtonItems = normalRightItems
         collectionView.allowsMultipleSelectionDuringEditing = true
         selectionPan.addTarget(self, action: #selector(handleSelectionPan(_:)))
         selectionPan.delegate = self
+        selectionLongPress.addTarget(self, action: #selector(handleSelectionLongPress(_:)))
+        selectionLongPress.minimumPressDuration = 0.3
+        selectionLongPress.delegate = self
+        collectionView.addGestureRecognizer(selectionLongPress)
         collectionView.addGestureRecognizer(selectionPan)
         setupSelectionToolbar()
 
@@ -317,6 +329,7 @@ final class BrowserViewController: UIViewController {
         let favoriteKeys: Set<String>? = showsOnlyFavorites ? FavoritesStore.shared.keys : nil
         let minimumSide = self.minimumSide
         let isFavoritesView = self.isFavoritesView
+        let emptyFolders = hideEmptyFolders ? knownEmptyFolders() : []
 
         filterQueue.async { [weak self] in
             // A newer request is already queued: skip this one.
@@ -324,6 +337,9 @@ final class BrowserViewController: UIViewController {
 
             var folders = query.isEmpty ? allFolders : allFolders.filter { $0.name.localizedCaseInsensitiveContains(query) }
             if isFavoritesView { folders = [] }
+            let foldersBeforeHiding = folders.count
+            if !emptyFolders.isEmpty { folders.removeAll { emptyFolders.contains($0.url) } }
+            let hiddenEmpty = foldersBeforeHiding - folders.count
 
             var base: [ImageItem] = []
             base.reserveCapacity(favoriteKeys == nil ? allImages.count : 64)
@@ -353,6 +369,7 @@ final class BrowserViewController: UIViewController {
 
             DispatchQueue.main.async {
                 guard let self, self.filterGeneration == generation else { return }
+                self.hiddenEmptyFolderCount = hiddenEmpty
                 self.applyFiltered(folders: folders, base: base, images: images, sourceIndices: sourceIndices,
                                    ratios: ratios, hidden: hidden, keepPosition: keepPosition)
                 if restartResolver { self.startResolverIfNeeded() }
@@ -402,6 +419,42 @@ final class BrowserViewController: UIViewController {
         let maxOffset = max(-collectionView.adjustedContentInset.top,
                             collectionView.contentSize.height - collectionView.bounds.height + collectionView.adjustedContentInset.bottom)
         collectionView.contentOffset.y = min(offsetY + newMinY - oldMinY, maxOffset)
+    }
+
+    // MARK: Empty folders
+
+    /// Folders already known to contain no images; asks for the unknown ones and refilters as answers arrive.
+    private func knownEmptyFolders() -> Set<URL> {
+        var empty = Set<URL>()
+        let cache = FolderInfoCache.shared
+        for folder in allFolders {
+            if let info = cache.cached(folder.url) {
+                if !info.containsImages { empty.insert(folder.url) }
+            } else {
+                cache.info(for: folder.url) { [weak self] info in
+                    if !info.containsImages { self?.scheduleFolderRefilter() }
+                }
+            }
+        }
+        return empty
+    }
+
+    /// Coalesces many folder answers into one refilter.
+    private func scheduleFolderRefilter() {
+        guard !folderRefilterScheduled else { return }
+        folderRefilterScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self else { return }
+            self.folderRefilterScheduled = false
+            if self.hideEmptyFolders { self.applyFilter(keepPosition: true, restartResolver: false) }
+        }
+    }
+
+    @objc private func toggleHideEmptyFolders() {
+        hideEmptyFolders.toggle()
+        Settings.hideEmptyFolders = hideEmptyFolders
+        menuButton.menu = makeMenu()
+        applyFilter(keepPosition: true, restartResolver: false)
     }
 
     // MARK: Image metrics
@@ -479,7 +532,10 @@ final class BrowserViewController: UIViewController {
     private func updateStatus() {
         var parts: [String] = []
         if !folders.isEmpty { parts.append("\(folders.count.formatted()) folder\(folders.count == 1 ? "" : "s")") }
-        parts.append("\(images.count.formatted()) image\(images.count == 1 ? "" : "s")")
+        if showsImageControls || !images.isEmpty || folders.isEmpty {
+            parts.append("\(images.count.formatted()) image\(images.count == 1 ? "" : "s")")
+        }
+        if hiddenEmptyFolderCount > 0 { parts.append("\(hiddenEmptyFolderCount.formatted()) empty hidden") }
         if hiddenSmallCount > 0 { parts.append("\(hiddenSmallCount.formatted()) small hidden") }
         if isRevalidating {
             parts.append("checking for changes…")
@@ -503,6 +559,7 @@ final class BrowserViewController: UIViewController {
             collectionView.backgroundView = nil
         }
         if isSelecting { updateSelectionUI() }
+        updateContextualControls()
     }
 
     // MARK: Layout
@@ -544,7 +601,10 @@ final class BrowserViewController: UIViewController {
 
     private func makeMenu() -> UIMenu {
         let order = Settings.sortOrder
-        let sortActions = SortKey.allCases.map { key in
+        let imageContext = showsImageControls
+        // Folders have no size, so that order is only offered when images are shown.
+        let sortKeys = imageContext ? SortKey.allCases : [.name, .date]
+        let sortActions = sortKeys.map { key in
             UIAction(title: key.title, state: order.key == key ? .on : .off) { [weak self] _ in
                 Settings.sortOrder = SortOrder(key: key, ascending: order.ascending)
                 self?.menuButton.menu = self?.makeMenu()
@@ -602,20 +662,57 @@ final class BrowserViewController: UIViewController {
             FolderInfoCache.shared.invalidate()
             self?.reload()
         }
-        return UIMenu(children: [
-            UIMenu(options: .displayInline, children: isFavoritesView ? [] : [recursive, favoritesOnlyAction]),
-            UIMenu(title: "Sort By", image: UIImage(systemName: "arrow.up.arrow.down"), children: [
-                UIMenu(options: .displayInline, children: sortActions),
-                UIMenu(options: .displayInline, children: directionActions),
-            ]),
-            UIMenu(options: .displayInline, children: styleActions),
-            UIMenu(options: .displayInline, children: [larger, smaller]),
-            UIMenu(title: "Image Size", subtitle: minimumSide == 0 ? "All" : "≥ \(minimumSide) px",
-                   image: UIImage(systemName: "line.3.horizontal.decrease.circle"), children: sizeActions),
-            UIMenu(title: "Transparency", subtitle: current.title,
-                   image: UIImage(systemName: "checkerboard.rectangle"), children: backgroundActions),
-            UIMenu(options: .displayInline, children: folderActions + [refresh]),
-        ])
+        var sections: [UIMenuElement] = []
+        if !isFavoritesView {
+            var viewOptions: [UIMenuElement] = [recursive]
+            // Only meaningful while folders are listed.
+            if !includeSubfolders && (!allFolders.isEmpty || hideEmptyFolders) {
+                viewOptions.append(UIAction(title: "Hide Empty Folders", subtitle: "Folders without any images inside",
+                                            image: UIImage(systemName: "folder.badge.minus"),
+                                            state: hideEmptyFolders ? .on : .off) { [weak self] _ in
+                    self?.toggleHideEmptyFolders()
+                })
+            }
+            if imageContext { viewOptions.append(favoritesOnlyAction) }
+            sections.append(UIMenu(options: .displayInline, children: viewOptions))
+        }
+        sections.append(UIMenu(title: "Sort By", image: UIImage(systemName: "arrow.up.arrow.down"), children: [
+            UIMenu(options: .displayInline, children: sortActions),
+            UIMenu(options: .displayInline, children: directionActions),
+        ]))
+        if imageContext {
+            // The header sits on the first group; nested groups would push it down.
+            sections.append(UIMenu(title: "Images", options: .displayInline, children: styleActions))
+            sections.append(UIMenu(options: .displayInline, children: [larger, smaller]))
+            sections.append(UIMenu(options: .displayInline, children: [
+                UIMenu(title: "Image Size", subtitle: minimumSide == 0 ? "All" : "≥ \(minimumSide) px",
+                       image: UIImage(systemName: "line.3.horizontal.decrease.circle"), children: sizeActions),
+                UIMenu(title: "Transparency", subtitle: current.title,
+                       image: UIImage(systemName: "checkerboard.rectangle"), children: backgroundActions),
+            ]))
+        }
+        sections.append(UIMenu(title: folderURL == nil ? "" : "This Folder", options: .displayInline,
+                               children: folderActions + [refresh]))
+        return UIMenu(children: sections)
+    }
+
+    /// Image tools (select, slideshow, grid and image options) only make sense when images can be shown.
+    private var showsImageControls: Bool {
+        !allImages.isEmpty || includeSubfolders || isFavoritesView || favoritesOnly
+    }
+
+    /// Adapts the toolbar buttons, the menu and the search prompt to what the folder contains.
+    private func updateContextualControls() {
+        let imageContext = showsImageControls
+        let items: [UIBarButtonItem] = imageContext ? [menuButton, slideshowButton, selectButton] : [menuButton]
+        if items.map(ObjectIdentifier.init) != normalRightItems.map(ObjectIdentifier.init) {
+            normalRightItems = items
+            if !isSelecting { navigationItem.setRightBarButtonItems(items, animated: false) }
+        }
+        menuButton.menu = makeMenu()
+        let hasFolders = !allFolders.isEmpty
+        navigationItem.searchController?.searchBar.placeholder =
+            hasFolders && !allImages.isEmpty ? "Filter by name" : hasFolders ? "Filter folders" : "Filter images"
     }
 
     private func setMinimumSide(_ side: Int) {
@@ -673,6 +770,27 @@ final class BrowserViewController: UIViewController {
         var presenter: UIViewController = self
         while let presented = presenter.presentedViewController { presenter = presented }
         presenter.present(viewer, animated: true)
+    }
+}
+
+// MARK: - Folder menu
+
+extension BrowserViewController {
+    func folderMenu(for url: URL, sourceView: UIView) -> UIMenu {
+        let isFavorite = FavoriteFoldersStore.shared.contains(url)
+        let favorite = UIAction(title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                                image: UIImage(systemName: isFavorite ? "heart.slash" : "heart")) { _ in
+            FavoriteFoldersStore.shared.toggle(url)
+        }
+        let share = UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self, weak sourceView] _ in
+            let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            activity.popoverPresentationController?.sourceView = sourceView
+            self?.present(activity, animated: true)
+        }
+        let copyName = UIAction(title: "Copy Name", image: UIImage(systemName: "doc.on.doc")) { _ in
+            UIPasteboard.general.string = url.lastPathComponent
+        }
+        return UIMenu(children: [favorite, share, copyName])
     }
 }
 
@@ -774,21 +892,42 @@ extension BrowserViewController: UIDocumentPickerDelegate {
     }
 
     @objc private func handleSelectionPan(_ pan: UIPanGestureRecognizer) {
-        switch pan.state {
-        case .began:
-            guard let start = imageIndex(at: pan.location(in: collectionView)) else {
-                pan.state = .cancelled
+        handleDragSelection(pan)
+    }
+
+    @objc private func handleSelectionLongPress(_ press: UILongPressGestureRecognizer) {
+        if press.state == .began {
+            guard imageIndex(at: press.location(in: collectionView)) != nil else {
+                press.state = .cancelled
                 return
             }
+            if !isSelecting {
+                enterSelection()
+            }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+        handleDragSelection(press)
+    }
+
+    /// Shared by the horizontal swipe (selection mode) and the long-press drag: the first image
+    /// decides whether the drag selects or deselects, then the range up to the finger follows it.
+    private func handleDragSelection(_ gesture: UIGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            guard let start = imageIndex(at: gesture.location(in: collectionView)) else { return }
             let selecting = !selectedURLs.contains(images[start].url)
             dragSelection = (start, start, selecting, selectedURLs)
+            lastPanLocation = gesture.location(in: view)
+            // The finger now selects instead of scrolling; auto-scroll takes over near the edges.
+            collectionView.isScrollEnabled = false
             applyDragSelection(to: start, previous: start)
         case .changed:
-            lastPanLocation = pan.location(in: view)
+            lastPanLocation = gesture.location(in: view)
             extendDragSelection()
             updateAutoScroll()
         default:
             dragSelection = nil
+            collectionView.isScrollEnabled = true
             stopAutoScroll()
         }
     }
@@ -1052,7 +1191,12 @@ extension BrowserViewController: UICollectionViewDataSource {
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         if Section(rawValue: indexPath.section) == .folders {
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: FolderCell.reuseID, for: indexPath) as! FolderCell
-            cell.configure(with: folders[indexPath.item])
+            let folder = folders[indexPath.item]
+            cell.configure(with: folder)
+            cell.menuProvider = { [weak self, weak cell] in
+                guard let self, let cell, !self.isSelecting else { return nil }
+                return self.folderMenu(for: folder.url, sourceView: cell)
+            }
             return cell
         }
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: ThumbnailCell.reuseID, for: indexPath) as! ThumbnailCell
@@ -1123,56 +1267,14 @@ extension BrowserViewController: UICollectionViewDelegate {
         }
     }
 
-    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
-                        point: CGPoint) -> UIContextMenuConfiguration? {
-        guard !isSelecting, let indexPath = indexPaths.first else { return nil }
-        let url = indexPath.section == Section.folders.rawValue ? folders[indexPath.item].url : images[indexPath.item].url
-        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-            let share = UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { _ in
-                guard let self, let cell = collectionView.cellForItem(at: indexPath) else { return }
-                let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-                activity.popoverPresentationController?.sourceView = cell
-                self.present(activity, animated: true)
-            }
-            let copyName = UIAction(title: "Copy Name", image: UIImage(systemName: "doc.on.doc")) { _ in
-                UIPasteboard.general.string = url.lastPathComponent
-            }
-            guard indexPath.section == Section.images.rawValue else {
-                let isFavorite = FavoriteFoldersStore.shared.contains(url)
-                let favorite = UIAction(title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
-                                        image: UIImage(systemName: isFavorite ? "heart.slash" : "heart")) { _ in
-                    FavoriteFoldersStore.shared.toggle(url)
-                }
-                return UIMenu(children: [favorite, share, copyName])
-            }
-            let isFavorite = FavoritesStore.shared.contains(url)
-            let favorite = UIAction(title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
-                                    image: UIImage(systemName: isFavorite ? "heart.slash" : "heart")) { _ in
-                FavoritesStore.shared.toggle(url)
-            }
-            return UIMenu(children: [favorite, share, copyName])
-        }
-    }
-}
-
-extension BrowserViewController: UICollectionViewDragDelegate {
-    func collectionView(_ collectionView: UICollectionView, itemsForBeginning session: UIDragSession,
-                        at indexPath: IndexPath) -> [UIDragItem] {
-        guard indexPath.section == Section.images.rawValue else { return [] }
-        let dragged = images[indexPath.item].url
-        // Dragging a selected image carries the whole selection.
-        let urls = isSelecting && selectedURLs.contains(dragged) ? selectedURLsInOrder() : [dragged]
-        return urls.compactMap { url in
-            guard let provider = NSItemProvider(contentsOf: url) else { return nil }
-            provider.suggestedName = url.lastPathComponent
-            return UIDragItem(itemProvider: provider)
-        }
-    }
 }
 
 extension BrowserViewController: UIGestureRecognizerDelegate {
     /// Swipe selection only starts on a mostly horizontal drag, so vertical drags keep scrolling.
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === selectionLongPress {
+            return imageIndex(at: selectionLongPress.location(in: collectionView)) != nil
+        }
         guard gestureRecognizer === selectionPan else { return true }
         guard isSelecting else { return false }
         let velocity = selectionPan.velocity(in: collectionView)

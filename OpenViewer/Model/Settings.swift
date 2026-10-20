@@ -41,6 +41,11 @@ enum Settings {
         }
     }
 
+    static var hideEmptyFolders: Bool {
+        get { defaults.bool(forKey: "hideEmptyFolders") }
+        set { defaults.set(newValue, forKey: "hideEmptyFolders") }
+    }
+
     static var includeSubfolders: Bool {
         get { defaults.bool(forKey: "includeSubfolders") }
         set { defaults.set(newValue, forKey: "includeSubfolders") }

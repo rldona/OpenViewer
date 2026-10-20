@@ -20,16 +20,16 @@ behind the design.
 ## Features
 
 - **Open any folder** with the system picker. Recent folders are remembered, and the last one reopens on launch.
-- **Folder browsing** with cover thumbnails and item counts, or **Include Subfolders** to flatten the whole tree into one grid. The tree is scanned in the background and results stream in as they are found.
+- **Folder browsing** with cover thumbnails and item counts, an option to hide folders that contain no images anywhere inside, or **Include Subfolders** to flatten the whole tree into one grid. The tree is scanned in the background and results stream in as they are found.
 - **Justified grid** like Google Photos, where every image keeps its proportions, or a square grid. Pinch or press ⌘+ / ⌘− to resize, sort by natural name, date or size, and filter by name.
 - **Full-screen viewer**: swipe between images, double-tap or pinch to zoom, zoom transition from the grid, and swipe down to close.
 - **Favorites**: tap ♥︎ in the viewer, press F, or long-press a thumbnail. Filter any folder with *Favorites Only*, or open *Favorites* on the start screen to see favorites from all your folders. Folders can be favorited too (long-press a folder, or *Add Folder to Favorites* in the menu) and appear as shortcuts on the start screen. Favorites are stored inside the app and image files are never modified.
-- **Select multiple images** like in Photos: tap *Select*, then tap or swipe across thumbnails (the grid scrolls by itself near the edges). Share them, add or remove favorites, put them in a new folder, or copy or move them anywhere the Files app can reach. ⌘A selects everything.
+- **Select multiple images** like in Google Photos: long-press an image and, without lifting your finger, drag across or down to select a whole range (the grid scrolls by itself near the edges). You can also tap *Select* and then tap or swipe sideways. Share them, add or remove favorites, put them in a new folder, or copy or move them anywhere the Files app can reach. ⌘A selects everything.
 - **Compare two images**: select two and tap *Compare*. *Overlay* places B over A with an opacity slider, *Swipe* adds a draggable divider, and *Side by Side* keeps zoom and pan in sync. It is ideal for checking a scene's art against its collision map. Space flips between A and B, 1/2/3 switch modes and X swaps them.
 - **Made for sprites and extracted assets**: choose a checkerboard, gray, black or white background for transparent images (*Transparency* in the menu, or B in the viewer), and hide tiny files with *Image Size* (for example, everything under 64 px).
 - **Scrubber** to jump anywhere in collections with thousands of images.
 - **Slideshow** at 2, 3, 5 or 10 seconds (long-press the play button).
-- **Animated GIF** playback, an **EXIF info** panel, Share, drag and drop to other apps, and multi-window / Stage Manager support.
+- **Animated GIF** playback, an **EXIF info** panel, Share, and multi-window / Stage Manager support.
 - **Keyboard**: ← → / space to move, Home / End, Esc to close, I for info, F to favorite, B to change the transparency background, S for slideshow, H to hide controls, ⌘O to open a folder, ⌘R to include subfolders, ⌘F to search.
 - Formats: everything ImageIO decodes, including JPEG, PNG, HEIC/HEIF, WebP, AVIF, GIF, TIFF, BMP, PSD and RAW (DNG, CR2/CR3, NEF, ARW, RAF, ORF, RW2 and more).
 

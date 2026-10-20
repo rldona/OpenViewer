@@ -132,8 +132,12 @@ final class ThumbnailCell: UICollectionViewCell {
 }
 
 /// Folder card: cover thumbnail, name and a lazily computed summary.
-final class FolderCell: UICollectionViewCell {
+final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     static let reuseID = "FolderCell"
+
+    /// Long-press menu. It lives on the cell (not the collection view) so long presses on images
+    /// stay free for selection.
+    var menuProvider: (() -> UIMenu?)?
 
     private let coverView = UIImageView()
     private let nameLabel = UILabel()
@@ -188,6 +192,13 @@ final class FolderCell: UICollectionViewCell {
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
+        addInteraction(UIContextMenuInteraction(delegate: self))
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        guard let menu = menuProvider?() else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
     }
 
     required init?(coder: NSCoder) { fatalError() }
