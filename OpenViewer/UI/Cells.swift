@@ -102,6 +102,18 @@ final class ThumbnailCell: UICollectionViewCell {
             ? .quaternarySystemFill : Settings.transparencyBackground.color
     }
 
+    /// Visual confirmation of a long press (iPads have no haptic engine): a quick press-and-bounce.
+    func pulse() {
+        UIView.animate(withDuration: 0.1, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.contentView.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+        } completion: { _ in
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.45, initialSpringVelocity: 0,
+                           options: [.allowUserInteraction]) {
+                self.contentView.transform = .identity
+            }
+        }
+    }
+
     func updateFavorite() {
         let isFavorite = representedURL.map(FavoritesStore.shared.contains) ?? false
         favoriteBadge.isHidden = !isFavorite
@@ -199,6 +211,12 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
                                 configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
         guard let menu = menuProvider?() else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction, willDisplayMenuFor configuration: UIContextMenuConfiguration,
+                                animator: UIContextMenuInteractionAnimating?) {
+        // No-op on iPad hardware, which has no haptic engine; the menu's lift animation is the visual cue.
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
     required init?(coder: NSCoder) { fatalError() }

@@ -66,6 +66,7 @@ final class BrowserViewController: UIViewController {
     private var favoriteSelectionButton: UIBarButtonItem!
     private var folderSelectionButton: UIBarButtonItem!
     private var compareSelectionButton: UIBarButtonItem!
+    private var deleteSelectionButton: UIBarButtonItem!
     /// Sources of a "Copy to…" / "Move to…" in progress, and whether it moves them.
     private var pendingExport: (sources: [URL], isMove: Bool)?
     /// Photos-style swipe selection: a horizontal drag selects (or deselects) the range it covers.
@@ -203,7 +204,10 @@ final class BrowserViewController: UIViewController {
             UIKeyCommand(title: "Slideshow", action: #selector(startSlideshow), input: "p", modifierFlags: .command),
             UIKeyCommand(title: "Back", action: #selector(goBack), input: UIKeyCommand.inputLeftArrow, modifierFlags: .command),
             UIKeyCommand(title: "Select All", action: #selector(selectAllFromKeyboard), input: "a", modifierFlags: .command),
-        ] + (isSelecting ? [UIKeyCommand(title: "Done", action: #selector(exitSelection), input: UIKeyCommand.inputEscape)] : [])
+        ] + (isSelecting ? [
+            UIKeyCommand(title: "Done", action: #selector(exitSelection), input: UIKeyCommand.inputEscape),
+            UIKeyCommand(title: "Delete", action: #selector(confirmDeleteSelection), input: "\u{8}", modifierFlags: .command),
+        ] : [])
     }
 
     // MARK: Loading
@@ -808,6 +812,10 @@ extension BrowserViewController: UIDocumentPickerDelegate {
         favoriteSelectionButton.accessibilityLabel = "Favorite"
         folderSelectionButton = UIBarButtonItem(image: UIImage(systemName: "folder.badge.plus"), menu: nil)
         folderSelectionButton.accessibilityLabel = "Copy or Move"
+        deleteSelectionButton = UIBarButtonItem(image: UIImage(systemName: "trash"), style: .plain,
+                                                target: self, action: #selector(confirmDeleteSelection))
+        deleteSelectionButton.tintColor = .systemRed
+        deleteSelectionButton.accessibilityLabel = "Delete"
         compareSelectionButton = UIBarButtonItem(image: UIImage(systemName: "square.split.2x1"), style: .plain,
                                                  target: self, action: #selector(compareSelection))
         compareSelectionButton.accessibilityLabel = "Compare"
@@ -821,6 +829,8 @@ extension BrowserViewController: UIDocumentPickerDelegate {
             favoriteSelectionButton,
             .fixedSpace(16),
             folderSelectionButton,
+            .fixedSpace(16),
+            deleteSelectionButton,
         ]
     }
 
@@ -904,7 +914,12 @@ extension BrowserViewController: UIDocumentPickerDelegate {
             if !isSelecting {
                 enterSelection()
             }
+            // Haptics only exist on iPhone; on iPad the bounce is the confirmation.
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            if let indexPath = collectionView.indexPathForItem(at: press.location(in: collectionView)),
+               let cell = collectionView.cellForItem(at: indexPath) as? ThumbnailCell {
+                cell.pulse()
+            }
         }
         handleDragSelection(press)
     }
@@ -1008,6 +1023,7 @@ extension BrowserViewController: UIDocumentPickerDelegate {
         shareSelectionButton.isEnabled = hasSelection
         favoriteSelectionButton.isEnabled = hasSelection
         folderSelectionButton.isEnabled = hasSelection
+        deleteSelectionButton.isEnabled = hasSelection
         compareSelectionButton.isEnabled = count == 2
         let allFavorite = hasSelection && selectedURLs.allSatisfy(FavoritesStore.shared.contains)
         favoriteSelectionButton.image = UIImage(systemName: allFavorite ? "heart.fill" : "heart")
@@ -1118,6 +1134,60 @@ extension BrowserViewController: UIDocumentPickerDelegate {
                 progress.dismiss(animated: true) {
                     self?.finishTransfer(failures: failures, total: sources.count, folderName: folder.lastPathComponent, move: move)
                 }
+            }
+        }
+    }
+
+    // MARK: Delete
+
+    @objc private func confirmDeleteSelection() {
+        let urls = selectedURLsInOrder()
+        guard isSelecting, !urls.isEmpty else { return }
+        let count = urls.count
+        let noun = count == 1 ? "Image" : "\(count.formatted()) Images"
+        let alert = UIAlertController(
+            title: "Delete \(noun)?",
+            message: "They will be moved to Recently Deleted in the Files app when the location supports it. "
+                + "Otherwise they are deleted permanently and can't be recovered.",
+            preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "Delete \(noun)", style: .destructive) { [weak self] _ in
+            self?.delete(urls)
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.popoverPresentationController?.barButtonItem = deleteSelectionButton
+        present(alert, animated: true)
+    }
+
+    private func delete(_ urls: [URL]) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            var deleted: [URL] = []
+            var failures = 0
+            for url in urls {
+                do {
+                    // Prefer the trash so the deletion can be undone from the Files app.
+                    try fileManager.trashItem(at: url, resultingItemURL: nil)
+                    deleted.append(url)
+                } catch {
+                    do {
+                        try fileManager.removeItem(at: url)
+                        deleted.append(url)
+                    } catch {
+                        failures += 1
+                    }
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                if !deleted.isEmpty { FavoritesStore.shared.set(deleted, favorite: false) }
+                self?.exitSelection()
+                FolderInfoCache.shared.invalidate()
+                self?.reload()
+                guard failures > 0 else { return }
+                let alert = UIAlertController(title: "Some Images Weren't Deleted",
+                                              message: "\(failures) of \(urls.count) could not be deleted.",
+                                              preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self?.present(alert, animated: true)
             }
         }
     }
