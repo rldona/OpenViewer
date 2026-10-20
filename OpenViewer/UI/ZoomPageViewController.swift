@@ -86,7 +86,7 @@ final class ZoomPageViewController: UIViewController, UIScrollViewDelegate {
 
     private func loadImage() {
         // 1. Instant: whatever grid thumbnail is already in memory.
-        for pixels in [768, 512, 256] {
+        for pixels in ImagePipeline.thumbnailBuckets.reversed() {
             if let thumb = ImagePipeline.thumbnails.cachedImage(for: .init(item, maxPixel: pixels)) {
                 setImage(thumb)
                 break
@@ -191,7 +191,7 @@ final class ZoomPageViewController: UIViewController, UIScrollViewDelegate {
         let fittedPixels = imageView.bounds.width * view.traitCollection.displayScale
         let originalWidth = originalPixelSize?.width ?? fittedPixels
         let native = fittedPixels > 0 ? originalWidth / fittedPixels : 1
-        scrollView.maximumZoomScale = min(max(4, native * 2), 16)
+        scrollView.maximumZoomScale = min(max(4, native * 2), 32)
     }
 
     private func centerContent() {

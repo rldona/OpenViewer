@@ -41,13 +41,11 @@ final class ImagePipeline {
     /// Screen-sized images for the viewer.
     static let screen = ImagePipeline(name: "screen", diskCache: false, memoryLimit: 250 << 20, concurrency: 3)
 
+    static let thumbnailBuckets = [256, 512, 768, 1024, 1536, 2048]
+
     /// Thumbnail sizes are bucketed so changing the grid size reuses cached images.
     static func thumbnailBucket(forPixels pixels: CGFloat) -> Int {
-        switch pixels {
-        case ..<257: return 256
-        case ..<513: return 512
-        default: return 768
-        }
+        thumbnailBuckets.first { CGFloat($0) >= pixels } ?? thumbnailBuckets.last!
     }
 
     private final class Entry {

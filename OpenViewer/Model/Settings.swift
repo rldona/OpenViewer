@@ -22,6 +22,11 @@ enum Settings {
         set { defaults.set(newValue, forKey: "gridLevel") }
     }
 
+    static var gridStyle: GalleryLayout.Style {
+        get { GalleryLayout.Style(rawValue: defaults.string(forKey: "gridStyle") ?? "") ?? .justified }
+        set { defaults.set(newValue.rawValue, forKey: "gridStyle") }
+    }
+
     static var includeSubfolders: Bool {
         get { defaults.bool(forKey: "includeSubfolders") }
         set { defaults.set(newValue, forKey: "includeSubfolders") }

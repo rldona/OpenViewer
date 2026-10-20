@@ -2,8 +2,8 @@ import UIKit
 
 /// Grid of a folder's subfolders and images, or — with "Include Subfolders" — every image in the tree.
 final class BrowserViewController: UIViewController {
-    /// Target thumbnail widths in points for each grid zoom level.
-    static let gridLevels: [CGFloat] = [72, 100, 140, 190, 260, 360]
+    /// Row height (justified grid) or cell width (square grid), in points, for each zoom level.
+    static let gridLevels: [CGFloat] = [80, 110, 150, 200, 280, 380]
 
     private enum Section: Int, CaseIterable { case folders, images }
 
@@ -26,7 +26,11 @@ final class BrowserViewController: UIViewController {
 
     private var includeSubfolders = Settings.includeSubfolders
     private var gridLevel = min(max(Settings.gridLevel, 0), BrowserViewController.gridLevels.count - 1)
-    private var thumbnailPixels = 256
+    private let layout = GalleryLayout()
+    /// Aspect ratio of each entry in `images`; placeholders until resolved.
+    private var ratios: [CGFloat] = []
+    private var resolver: AspectResolver?
+    private var contentGeneration = 0
     private var prefetchTokens: [IndexPath: LoadToken] = [:]
     private var menuButton: UIBarButtonItem!
 
@@ -38,7 +42,10 @@ final class BrowserViewController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    deinit { scanFlag?.cancelled = true }
+    deinit {
+        scanFlag?.cancelled = true
+        resolver?.cancel()
+    }
 
     // MARK: Lifecycle
 
@@ -50,7 +57,7 @@ final class BrowserViewController: UIViewController {
         navigationItem.titleView = titleView
         title = displayName
 
-        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: makeLayout())
+        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .systemBackground
         collectionView.dataSource = self
@@ -62,6 +69,8 @@ final class BrowserViewController: UIViewController {
         collectionView.register(FolderCell.self, forCellWithReuseIdentifier: FolderCell.reuseID)
         collectionView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:))))
         view.addSubview(collectionView)
+        layout.style = Settings.gridStyle
+        layout.targetSize = Self.gridLevels[gridLevel]
 
         emptyLabel.textColor = .secondaryLabel
         emptyLabel.textAlignment = .center
@@ -174,8 +183,85 @@ final class BrowserViewController: UIViewController {
         }
         prefetchTokens.values.forEach { ImagePipeline.thumbnails.cancel($0) }
         prefetchTokens.removeAll()
+
+        let store = AspectRatioStore.shared
+        var known = [Bool](repeating: false, count: images.count)
+        ratios = images.indices.map { index in
+            guard let ratio = store.ratio(for: images[index].url) else { return AspectRatioStore.placeholder }
+            known[index] = true
+            return ratio
+        }
+        layout.ratios = ratios
         collectionView.reloadData()
         updateStatus()
+        startResolver(known: known)
+    }
+
+    // MARK: Aspect ratios
+
+    /// Reads unknown aspect ratios from file headers in the background, visible items first.
+    private func startResolver(known: [Bool]) {
+        resolver?.cancel()
+        resolver = nil
+        contentGeneration += 1
+        guard layout.style == .justified, known.contains(false) else { return }
+        let generation = contentGeneration
+        let resolver = AspectResolver(urls: images.map(\.url), known: known) { [weak self] batch in
+            guard let self, generation == self.contentGeneration else { return }
+            self.applyRatios(batch)
+        }
+        self.resolver = resolver
+        if let visible = visibleImageRange() { resolver.prioritize(visible) }
+        resolver.start()
+    }
+
+    private func applyRatios(_ batch: [(index: Int, ratio: CGFloat)]) {
+        var changed = false
+        for (index, ratio) in batch where index < ratios.count && abs(ratios[index] - ratio) > 0.001 {
+            ratios[index] = ratio
+            changed = true
+        }
+        guard changed else { return }
+        relayoutKeepingPosition(animated: false) { self.layout.ratios = self.ratios }
+    }
+
+    private func visibleImageRange(margin: Int = 60) -> Range<Int>? {
+        let visible = collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }.map(\.item)
+        guard let low = visible.min(), let high = visible.max() else {
+            return images.isEmpty ? nil : 0..<min(images.count, margin * 2)
+        }
+        return max(0, low - margin)..<min(images.count, high + margin + 1)
+    }
+
+    /// Applies a layout change while keeping the first visible image where it is on screen.
+    private func relayoutKeepingPosition(animated: Bool, _ change: @escaping () -> Void) {
+        let offsetY = collectionView.contentOffset.y
+        let atTop = offsetY <= -collectionView.adjustedContentInset.top + 1
+        let anchor = collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }.min()
+        let oldMinY = anchor.flatMap { layout.imageFrame(at: $0.item)?.minY }
+
+        let apply = {
+            change()
+            self.collectionView.layoutIfNeeded()
+            if !atTop, let anchor, let oldMinY, let newMinY = self.layout.imageFrame(at: anchor.item)?.minY {
+                let maxOffset = max(-self.collectionView.adjustedContentInset.top,
+                                    self.collectionView.contentSize.height - self.collectionView.bounds.height
+                                        + self.collectionView.adjustedContentInset.bottom)
+                self.collectionView.contentOffset.y = min(offsetY + newMinY - oldMinY, maxOffset)
+            }
+        }
+        if animated {
+            UIView.animate(withDuration: 0.25, animations: apply)
+        } else {
+            apply()
+        }
+        let visible = collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }
+        collectionView.reconfigureItems(at: visible)
+    }
+
+    private func thumbnailPixels(for index: Int) -> Int {
+        let frame = layout.imageFrame(at: index) ?? CGRect(x: 0, y: 0, width: 150, height: 150)
+        return ImagePipeline.thumbnailBucket(forPixels: max(frame.width, frame.height) * traitCollection.displayScale)
     }
 
     private func updateStatus() {
@@ -196,59 +282,23 @@ final class BrowserViewController: UIViewController {
 
     // MARK: Layout
 
-    private func makeLayout() -> UICollectionViewCompositionalLayout {
-        UICollectionViewCompositionalLayout { [weak self] sectionIndex, environment in
-            guard let self else { return nil }
-            let width = environment.container.effectiveContentSize.width
-            switch Section(rawValue: sectionIndex)! {
-            case .folders:
-                let columns = max(1, Int(width / 320))
-                let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1 / CGFloat(columns)),
-                                                                    heightDimension: .fractionalHeight(1)))
-                let group = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1),
-                                                                                 heightDimension: .absolute(72)),
-                                                               repeatingSubitem: item, count: columns)
-                group.interItemSpacing = .fixed(10)
-                let section = NSCollectionLayoutSection(group: group)
-                section.interGroupSpacing = 10
-                section.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 16, bottom: 16, trailing: 16)
-                return section
-
-            case .images:
-                let spacing: CGFloat = 2
-                let target = Self.gridLevels[self.gridLevel]
-                let columns = max(2, Int(((width + spacing) / (target + spacing)).rounded()))
-                let cellWidth = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
-                self.thumbnailPixels = ImagePipeline.thumbnailBucket(forPixels: cellWidth * self.traitCollection.displayScale)
-
-                let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1 / CGFloat(columns)),
-                                                                    heightDimension: .fractionalHeight(1)))
-                let group = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1),
-                                                                                 heightDimension: .absolute(cellWidth)),
-                                                               repeatingSubitem: item, count: columns)
-                group.interItemSpacing = .fixed(spacing)
-                let section = NSCollectionLayoutSection(group: group)
-                section.interGroupSpacing = spacing
-                return section
-            }
-        }
-    }
-
     private func setGridLevel(_ level: Int) {
         let clamped = min(max(level, 0), Self.gridLevels.count - 1)
         guard clamped != gridLevel else { return }
         gridLevel = clamped
         Settings.gridLevel = clamped
-        let oldPixels = thumbnailPixels
-        UIView.animate(withDuration: 0.25) {
-            self.collectionView.collectionViewLayout.invalidateLayout()
-            self.collectionView.layoutIfNeeded()
-        }
-        if thumbnailPixels != oldPixels {
-            let visible = collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }
-            collectionView.reconfigureItems(at: visible)
-        }
+        relayoutKeepingPosition(animated: true) { self.layout.targetSize = Self.gridLevels[clamped] }
         menuButton.menu = makeMenu()
+    }
+
+    private func setGridStyle(_ style: GalleryLayout.Style) {
+        guard style != layout.style else { return }
+        Settings.gridStyle = style
+        relayoutKeepingPosition(animated: true) { self.layout.style = style }
+        menuButton.menu = makeMenu()
+        if style == .justified {
+            startResolver(known: images.map { AspectRatioStore.shared.ratio(for: $0.url) != nil })
+        }
     }
 
     @objc private func handlePinch(_ pinch: UIPinchGestureRecognizer) {
@@ -294,6 +344,12 @@ final class BrowserViewController: UIViewController {
                               attributes: gridLevel == Self.gridLevels.count - 1 ? .disabled : []) { [weak self] _ in self?.zoomIn() }
         let smaller = UIAction(title: "Smaller Thumbnails", image: UIImage(systemName: "minus.magnifyingglass"),
                                attributes: gridLevel == 0 ? .disabled : []) { [weak self] _ in self?.zoomOut() }
+        let styleActions = [
+            UIAction(title: "Original Proportions", image: UIImage(systemName: "rectangle.3.group"),
+                     state: layout.style == .justified ? .on : .off) { [weak self] _ in self?.setGridStyle(.justified) },
+            UIAction(title: "Square", image: UIImage(systemName: "square.grid.3x3"),
+                     state: layout.style == .square ? .on : .off) { [weak self] _ in self?.setGridStyle(.square) },
+        ]
         let refresh = UIAction(title: "Refresh", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
             FolderInfoCache.shared.invalidate()
             self?.reload()
@@ -304,6 +360,7 @@ final class BrowserViewController: UIViewController {
                 UIMenu(options: .displayInline, children: sortActions),
                 UIMenu(options: .displayInline, children: directionActions),
             ]),
+            UIMenu(options: .displayInline, children: styleActions),
             UIMenu(options: .displayInline, children: [larger, smaller]),
             UIMenu(options: .displayInline, children: [refresh]),
         ])
@@ -367,7 +424,7 @@ extension BrowserViewController: UICollectionViewDataSource {
             return cell
         }
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: ThumbnailCell.reuseID, for: indexPath) as! ThumbnailCell
-        cell.configure(with: images[indexPath.item], pixelSize: thumbnailPixels)
+        cell.configure(with: images[indexPath.item], pixelSize: thumbnailPixels(for: indexPath.item))
         return cell
     }
 }
@@ -376,7 +433,7 @@ extension BrowserViewController: UICollectionViewDataSourcePrefetching {
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
         for indexPath in indexPaths where indexPath.section == Section.images.rawValue && indexPath.item < images.count {
             guard prefetchTokens[indexPath] == nil else { continue }
-            let request = ImagePipeline.Request(images[indexPath.item], maxPixel: thumbnailPixels)
+            let request = ImagePipeline.Request(images[indexPath.item], maxPixel: thumbnailPixels(for: indexPath.item))
             if let token = ImagePipeline.thumbnails.load(request, priority: .low, completion: { [weak self] _ in
                 self?.prefetchTokens[indexPath] = nil
             }) {
@@ -395,6 +452,10 @@ extension BrowserViewController: UICollectionViewDataSourcePrefetching {
 // MARK: - Delegate
 
 extension BrowserViewController: UICollectionViewDelegate {
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if let resolver, let visible = visibleImageRange() { resolver.prioritize(visible) }
+    }
+
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
         switch Section(rawValue: indexPath.section)! {

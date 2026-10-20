@@ -92,7 +92,8 @@ final class OpenViewerTests: XCTestCase {
     func testThumbnailBuckets() {
         XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 100), 256)
         XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 300), 512)
-        XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 900), 768)
+        XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 900), 1024)
+        XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 9000), 2048)
     }
 
     private func writePNG(_ url: URL, width: Int, height: Int, type: UTType = .png) throws {

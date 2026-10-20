@@ -10,7 +10,8 @@ final class ThumbnailCell: UICollectionViewCell {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        contentView.backgroundColor = .secondarySystemFill
+        // A barely visible placeholder: a solid gray block flashes when many cells appear at once.
+        contentView.backgroundColor = .quaternarySystemFill
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
         imageView.frame = contentView.bounds
@@ -33,6 +34,15 @@ final class ThumbnailCell: UICollectionViewCell {
         if let image = ImagePipeline.thumbnails.cachedImage(for: request) {
             setImage(image)
             return
+        }
+        // Show any size already in memory (e.g. from before a pinch) while the right one loads.
+        if imageView.image == nil {
+            for pixels in ImagePipeline.thumbnailBuckets.reversed() where pixels != pixelSize {
+                if let image = ImagePipeline.thumbnails.cachedImage(for: .init(item, maxPixel: pixels)) {
+                    setImage(image)
+                    break
+                }
+            }
         }
         // When reconfigured for a new grid size the previous image stays visible until the new one arrives.
         ImagePipeline.thumbnails.cancel(token)
