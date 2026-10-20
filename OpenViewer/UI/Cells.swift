@@ -143,7 +143,7 @@ final class ThumbnailCell: UICollectionViewCell {
     }
 }
 
-/// Folder card: cover thumbnail, name and a lazily computed summary.
+/// Folder card: a mosaic of up to four images from inside the folder, its name and a summary.
 final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     static let reuseID = "FolderCell"
 
@@ -151,35 +151,39 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     /// stay free for selection.
     var menuProvider: (() -> UIMenu?)?
 
-    private let coverView = UIImageView()
+    private let mosaic = UIView()
+    private let tiles = (0..<4).map { _ in UIImageView() }
+    private let placeholder = UIImageView(image: UIImage(systemName: "folder.fill",
+                                                         withConfiguration: UIImage.SymbolConfiguration(pointSize: 34)))
     private let nameLabel = UILabel()
     private let favoriteBadge = UIImageView(image: UIImage(systemName: "heart.fill",
                                                            withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)))
     private let detailLabel = UILabel()
-    private var token: LoadToken?
+    private var tokens: [LoadToken] = []
     private var representedURL: URL?
+    private var tileCount = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        contentView.backgroundColor = .secondarySystemGroupedBackground
-        contentView.layer.cornerRadius = 12
-        contentView.layer.cornerCurve = .continuous
-
-        coverView.contentMode = .scaleAspectFill
-        coverView.clipsToBounds = true
-        coverView.layer.cornerRadius = 8
-        coverView.layer.cornerCurve = .continuous
-        coverView.backgroundColor = .tertiarySystemFill
-        coverView.tintColor = .systemBlue
+        mosaic.backgroundColor = .tertiarySystemFill
+        mosaic.layer.cornerRadius = 14
+        mosaic.layer.cornerCurve = .continuous
+        mosaic.clipsToBounds = true
+        for tile in tiles {
+            tile.contentMode = .scaleAspectFill
+            tile.clipsToBounds = true
+            tile.backgroundColor = .quaternarySystemFill
+            mosaic.addSubview(tile)
+        }
+        placeholder.tintColor = .tertiaryLabel
+        placeholder.contentMode = .center
+        mosaic.addSubview(placeholder)
 
         nameLabel.font = .preferredFont(forTextStyle: .headline)
         nameLabel.adjustsFontForContentSizeCategory = true
+        nameLabel.lineBreakMode = .byTruncatingMiddle
         detailLabel.font = .preferredFont(forTextStyle: .subheadline)
         detailLabel.textColor = .secondaryLabel
-
-        let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
-        chevron.tintColor = .tertiaryLabel
-        chevron.setContentHuggingPriority(.required, for: .horizontal)
 
         favoriteBadge.tintColor = .systemPink
         favoriteBadge.isHidden = true
@@ -189,22 +193,59 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         titleRow.alignment = .center
         let labels = UIStackView(arrangedSubviews: [titleRow, detailLabel])
         labels.axis = .vertical
-        labels.spacing = 2
-        let row = UIStackView(arrangedSubviews: [coverView, labels, chevron])
-        row.alignment = .center
-        row.spacing = 12
-        row.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(row)
+        labels.spacing = 1
+        labels.alignment = .leading
+        labels.translatesAutoresizingMaskIntoConstraints = false
+        mosaic.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(mosaic)
+        contentView.addSubview(labels)
         NSLayoutConstraint.activate([
-            coverView.widthAnchor.constraint(equalToConstant: 52),
-            coverView.heightAnchor.constraint(equalToConstant: 52),
-            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 10),
-            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            row.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            mosaic.topAnchor.constraint(equalTo: contentView.topAnchor),
+            mosaic.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            mosaic.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            mosaic.heightAnchor.constraint(equalTo: mosaic.widthAnchor, multiplier: 3.0 / 4.0),
+            labels.topAnchor.constraint(equalTo: mosaic.bottomAnchor, constant: 8),
+            labels.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 2),
+            labels.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor),
+            titleRow.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor),
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
         addInteraction(UIContextMenuInteraction(delegate: self))
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layoutTiles()
+    }
+
+    /// 1 image fills the card, 2 split it, 3 = one tall + two stacked, 4 = a 2×2 grid.
+    private func layoutTiles() {
+        let bounds = mosaic.bounds
+        let gap: CGFloat = 2
+        let halfW = (bounds.width - gap) / 2, halfH = (bounds.height - gap) / 2
+        let frames: [CGRect]
+        switch tileCount {
+        case 0: frames = []
+        case 1: frames = [bounds]
+        case 2: frames = [CGRect(x: 0, y: 0, width: halfW, height: bounds.height),
+                          CGRect(x: halfW + gap, y: 0, width: halfW, height: bounds.height)]
+        case 3: frames = [CGRect(x: 0, y: 0, width: halfW, height: bounds.height),
+                          CGRect(x: halfW + gap, y: 0, width: halfW, height: halfH),
+                          CGRect(x: halfW + gap, y: halfH + gap, width: halfW, height: halfH)]
+        default: frames = [CGRect(x: 0, y: 0, width: halfW, height: halfH),
+                           CGRect(x: halfW + gap, y: 0, width: halfW, height: halfH),
+                           CGRect(x: 0, y: halfH + gap, width: halfW, height: halfH),
+                           CGRect(x: halfW + gap, y: halfH + gap, width: halfW, height: halfH)]
+        }
+        for (index, tile) in tiles.enumerated() {
+            tile.isHidden = index >= frames.count
+            if index < frames.count { tile.frame = frames[index] }
+        }
+        placeholder.frame = bounds
+        placeholder.isHidden = tileCount > 0
     }
 
     func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
@@ -219,10 +260,8 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }
 
-    required init?(coder: NSCoder) { fatalError() }
-
     override var isHighlighted: Bool {
-        didSet { contentView.backgroundColor = isHighlighted ? .systemFill : .secondarySystemGroupedBackground }
+        didSet { contentView.alpha = isHighlighted ? 0.6 : 1 }
     }
 
     func configure(with folder: FolderItem) {
@@ -234,7 +273,7 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
             apply(info, for: folder.url)
         } else {
             detailLabel.text = " "
-            showPlaceholder()
+            setTileCount(0)
             FolderInfoCache.shared.info(for: folder.url) { [weak self] info in
                 guard let self, self.representedURL == folder.url else { return }
                 self.apply(info, for: folder.url)
@@ -248,35 +287,44 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         accessibilityHint = isFavorite ? "Favorite folder" : nil
     }
 
+    private func setTileCount(_ count: Int) {
+        tileCount = count
+        setNeedsLayout()
+    }
+
     private func apply(_ info: FolderInfoCache.Info, for url: URL) {
         detailLabel.text = info.subtitle
         accessibilityValue = info.subtitle
-        guard let cover = info.cover else { showPlaceholder(); return }
-        let request = ImagePipeline.Request(cover, maxPixel: 256)
-        if let image = ImagePipeline.thumbnails.cachedImage(for: request) {
-            coverView.contentMode = .scaleAspectFill
-            coverView.image = image
-            return
+        setTileCount(info.covers.count)
+        // Request each tile at its real on-screen size (a single cover fills the card).
+        let tileWidth = info.covers.count == 1 ? bounds.width : bounds.width / 2
+        let pixels = ImagePipeline.thumbnailBucket(forPixels: max(tileWidth, 120) * traitCollection.displayScale)
+        let background = Settings.transparencyBackground.color
+        tiles.forEach { $0.backgroundColor = background }
+        for (index, cover) in info.covers.enumerated() {
+            let tile = tiles[index]
+            let request = ImagePipeline.Request(cover, maxPixel: pixels)
+            if let image = ImagePipeline.thumbnails.cachedImage(for: request) {
+                tile.image = image
+                continue
+            }
+            tile.image = nil
+            if let token = ImagePipeline.thumbnails.load(request, completion: { [weak self, weak tile] image in
+                guard let self, self.representedURL == url else { return }
+                tile?.image = image
+            }) {
+                tokens.append(token)
+            }
         }
-        showPlaceholder()
-        token = ImagePipeline.thumbnails.load(request) { [weak self] image in
-            guard let self, self.representedURL == url, let image else { return }
-            self.coverView.contentMode = .scaleAspectFill
-            self.coverView.image = image
-        }
-    }
-
-    private func showPlaceholder() {
-        coverView.contentMode = .center
-        coverView.image = UIImage(systemName: "folder.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22))
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        ImagePipeline.thumbnails.cancel(token)
-        token = nil
+        tokens.forEach { ImagePipeline.thumbnails.cancel($0) }
+        tokens.removeAll()
         representedURL = nil
-        coverView.image = nil
+        tiles.forEach { $0.image = nil }
+        setTileCount(0)
     }
 }
 
@@ -366,5 +414,43 @@ final class TitleView: UIView {
         view.tintColor = .tertiaryLabel
         view.setContentHuggingPriority(.required, for: .horizontal)
         return view
+    }
+}
+
+/// Header above each folder's images in "All Images": folder name, its path and image count.
+final class GroupHeaderView: UICollectionReusableView {
+    static let reuseID = "GroupHeaderView"
+
+    private let titleLabel = UILabel()
+    private let subtitleLabel = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        titleLabel.font = .systemFont(ofSize: 19, weight: .bold)
+        titleLabel.setContentHuggingPriority(.required, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        subtitleLabel.font = .preferredFont(forTextStyle: .subheadline)
+        subtitleLabel.textColor = .secondaryLabel
+        subtitleLabel.lineBreakMode = .byTruncatingHead
+        let stack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
+        stack.spacing = 10
+        stack.alignment = .firstBaseline
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+        ])
+        isAccessibilityElement = true
+        accessibilityTraits = .header
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(title: String, subtitle: String) {
+        titleLabel.text = title
+        subtitleLabel.text = subtitle
+        accessibilityLabel = "\(title), \(subtitle)"
     }
 }

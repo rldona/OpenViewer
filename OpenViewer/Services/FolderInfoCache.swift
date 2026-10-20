@@ -5,7 +5,9 @@ final class FolderInfoCache {
     struct Info {
         let imageCount: Int
         let folderCount: Int
-        let cover: ImageItem?
+        /// Up to four images for the folder's mosaic, the first being the main cover.
+        let covers: [ImageItem]
+        var cover: ImageItem? { covers.first }
         /// Whether any image exists anywhere below this folder.
         let containsImages: Bool
 
@@ -48,9 +50,9 @@ final class FolderInfoCache {
 
     private static func compute(_ url: URL) -> Info {
         let listing = FolderScanner.list(url)
-        let cover = firstImage(in: listing) ?? deepCover(in: listing.folders, depth: 3)
-        let containsImages = cover != nil || listing.folders.contains { containsImage(in: $0.url) }
-        return Info(imageCount: listing.images.count, folderCount: listing.folders.count, cover: cover,
+        let covers = collectCovers(listing, limit: 4)
+        let containsImages = !covers.isEmpty || listing.folders.contains { containsImage(in: $0.url) }
+        return Info(imageCount: listing.images.count, folderCount: listing.folders.count, covers: covers,
                     containsImages: containsImages)
     }
 
@@ -65,20 +67,27 @@ final class FolderInfoCache {
         return false
     }
 
-    private static func firstImage(in listing: FolderScanner.Listing) -> ImageItem? {
-        listing.images.min { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    private static func byName(_ a: ImageItem, _ b: ImageItem) -> Bool {
+        a.name.localizedStandardCompare(b.name) == .orderedAscending
     }
 
-    /// Depth-first look into the first few subfolders so folders that only contain
-    /// sub-albums still get a cover. Bounded to keep it cheap.
-    private static func deepCover(in folders: [FolderItem], depth: Int) -> ImageItem? {
-        guard depth > 0 else { return nil }
-        for folder in folders.sorted(by: SortOrder(key: .name, ascending: true)).prefix(4) {
-            let inner = FolderScanner.list(folder.url)
-            if let image = firstImage(in: inner) ?? deepCover(in: inner.folders, depth: depth - 1) {
-                return image
-            }
+    /// Spreads the mosaic across the folder: its own images first, then the first image of each
+    /// sub-album, so a folder of albums shows a bit of each. Bounded to keep it cheap.
+    private static func collectCovers(_ listing: FolderScanner.Listing, limit: Int, depth: Int = 3) -> [ImageItem] {
+        var covers: [ImageItem] = []
+        let own = listing.images.sorted(by: byName)
+        if own.count >= limit {
+            // Evenly spaced samples rather than four near-identical neighbours.
+            let step = Double(own.count) / Double(limit)
+            return (0..<limit).map { own[Int(Double($0) * step)] }
         }
-        return nil
+        covers.append(contentsOf: own)
+        guard depth > 0 else { return covers }
+        for folder in listing.folders.sorted(by: SortOrder(key: .name, ascending: true)).prefix(6) {
+            guard covers.count < limit else { break }
+            let inner = FolderScanner.list(folder.url)
+            covers.append(contentsOf: collectCovers(inner, limit: 1, depth: depth - 1))
+        }
+        return covers
     }
 }

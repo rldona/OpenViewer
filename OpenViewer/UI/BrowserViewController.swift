@@ -61,6 +61,7 @@ final class BrowserViewController: UIViewController {
     private let scopeControl = UISegmentedControl(items: ["Folders", "All Images", "Favorites"])
     private let sizeSlider = UISlider()
     private let sizeControls = UIStackView()
+    private var fastScroller: FastScroller!
     private var selectButton: UIBarButtonItem!
 
     // Selection mode
@@ -131,6 +132,8 @@ final class BrowserViewController: UIViewController {
         collectionView.keyboardDismissMode = .onDrag
         collectionView.register(ThumbnailCell.self, forCellWithReuseIdentifier: ThumbnailCell.reuseID)
         collectionView.register(FolderCell.self, forCellWithReuseIdentifier: FolderCell.reuseID)
+        collectionView.register(GroupHeaderView.self, forSupplementaryViewOfKind: GalleryLayout.groupHeaderKind,
+                                withReuseIdentifier: GroupHeaderView.reuseID)
         collectionView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:))))
         view.addSubview(collectionView)
         layout.style = Settings.gridStyle
@@ -167,6 +170,7 @@ final class BrowserViewController: UIViewController {
         collectionView.addGestureRecognizer(selectionPan)
         setupSelectionToolbar()
         setupScopeBar()
+        setupFastScroller()
 
         NotificationCenter.default.addObserver(self, selector: #selector(favoritesChanged(_:)),
                                                name: FavoritesStore.didChange, object: nil)
@@ -354,6 +358,10 @@ final class BrowserViewController: UIViewController {
         let favoriteKeys: Set<String>? = showsOnlyFavorites ? FavoritesStore.shared.keys : nil
         let minimumSide = self.minimumSide
         let isFavoritesView = self.isFavoritesView
+        // Group by folder only when consecutive images share a folder: tree walks sorted by name.
+        let groupRoot: URL? = (includeSubfolders || isFavoritesView) && Settings.sortOrder.key == .name
+            ? (folderURL ?? URL(fileURLWithPath: "/")) : nil
+        let rootName = displayName
         let emptyFolders = hideEmptyFolders ? knownEmptyFolders() : []
 
         filterQueue.async { [weak self] in
@@ -391,15 +399,44 @@ final class BrowserViewController: UIViewController {
                 sourceIndices.append(index)
                 ratios.append(metrics?.ratio ?? ImageMetricsStore.placeholderRatio)
             }
+            let groups = groupRoot.map { Self.folderGroups(for: images, root: $0, rootName: rootName) } ?? []
 
             DispatchQueue.main.async {
                 guard let self, self.filterGeneration == generation else { return }
                 self.hiddenEmptyFolderCount = hiddenEmpty
+                self.layout.groups = groups
                 self.applyFiltered(folders: folders, base: base, images: images, sourceIndices: sourceIndices,
                                    ratios: ratios, hidden: hidden, keepPosition: keepPosition)
                 if restartResolver { self.startResolverIfNeeded() }
             }
         }
+    }
+
+    /// One group per run of images from the same folder, titled with the folder's name and path.
+    private static func folderGroups(for images: [ImageItem], root: URL, rootName: String) -> [GalleryLayout.Group] {
+        var groups: [GalleryLayout.Group] = []
+        let rootPath = root.standardizedFileURL.path
+        var index = 0
+        while index < images.count {
+            let folder = images[index].url.deletingLastPathComponent()
+            let folderPath = folder.standardizedFileURL.path
+            var end = index + 1
+            while end < images.count, images[end].url.deletingLastPathComponent().standardizedFileURL.path == folderPath {
+                end += 1
+            }
+            let count = end - index
+            let isRoot = folderPath == rootPath
+            var relative = folderPath.hasPrefix(rootPath + "/") ? String(folderPath.dropFirst(rootPath.count + 1)) : folderPath
+            if let slash = relative.lastIndex(of: "/") { relative = String(relative[..<slash]) } else { relative = "" }
+            let location = isRoot ? "" : (relative.isEmpty ? rootName : rootName + " / " + relative.replacingOccurrences(of: "/", with: " / "))
+            let countText = "\(count.formatted()) image\(count == 1 ? "" : "s")"
+            groups.append(GalleryLayout.Group(start: index,
+                                              title: isRoot ? rootName : folder.lastPathComponent,
+                                              subtitle: location.isEmpty ? countText : location + " · " + countText))
+            index = end
+        }
+        // A single group adds nothing.
+        return groups.count > 1 ? groups : []
     }
 
     private func applyFiltered(folders: [FolderItem], base: [ImageItem], images: [ImageItem], sourceIndices: [Int],
@@ -621,6 +658,26 @@ final class BrowserViewController: UIViewController {
     @objc private func zoomOut() { setGridLevel(gridLevel - 1) }
     @objc private func focusSearch() { navigationItem.searchController?.searchBar.becomeFirstResponder() }
     @objc private func goBack() { navigationController?.popViewController(animated: true) }
+
+    // MARK: Fast scroller
+
+    private func setupFastScroller() {
+        fastScroller = FastScroller(scrollView: collectionView)
+        fastScroller.labelProvider = { [weak self] y in
+            guard let self, let index = self.layout.groupIndex(atY: y), self.layout.groups.indices.contains(index) else { return nil }
+            return self.layout.groups[index].title
+        }
+        view.addSubview(fastScroller)
+        let guide = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            fastScroller.topAnchor.constraint(equalTo: guide.topAnchor, constant: 12),
+            fastScroller.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -92),
+            fastScroller.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+            fastScroller.widthAnchor.constraint(equalToConstant: 360),
+        ])
+        // The floating scope bar stays above the scroller.
+        view.bringSubviewToFront(scopeBar)
+    }
 
     // MARK: Scope bar
 
@@ -1340,6 +1397,17 @@ extension BrowserViewController: UIDocumentPickerDelegate {
 // MARK: - Data source
 
 extension BrowserViewController: UICollectionViewDataSource {
+    func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String,
+                        at indexPath: IndexPath) -> UICollectionReusableView {
+        let header = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: GroupHeaderView.reuseID,
+                                                                     for: indexPath) as! GroupHeaderView
+        if layout.groups.indices.contains(indexPath.item) {
+            let group = layout.groups[indexPath.item]
+            header.configure(title: group.title, subtitle: group.subtitle)
+        }
+        return header
+    }
+
     func numberOfSections(in collectionView: UICollectionView) -> Int { Section.allCases.count }
 
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
@@ -1387,6 +1455,7 @@ extension BrowserViewController: UICollectionViewDataSourcePrefetching {
 
 extension BrowserViewController: UICollectionViewDelegate {
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        fastScroller?.scrollViewDidScroll()
         prioritizeVisible()
     }
 
