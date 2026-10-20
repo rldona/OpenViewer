@@ -4,7 +4,8 @@ import UIKit
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        true
+        ImagePipeline.removeLegacyCaches()
+        return true
     }
 
     func application(_ application: UIApplication,
@@ -25,10 +26,16 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let windowScene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: windowScene)
-        let navigation = UINavigationController(rootViewController: HomeViewController())
+        let navigation = RootNavigationController(rootViewController: HomeViewController())
         navigation.navigationBar.prefersLargeTitles = true
         window.rootViewController = navigation
         window.makeKeyAndVisible()
         self.window = window
     }
+}
+
+/// The app hides the status bar everywhere so images get the whole screen.
+final class RootNavigationController: UINavigationController {
+    override var prefersStatusBarHidden: Bool { true }
+    override var childForStatusBarHidden: UIViewController? { nil }
 }

@@ -18,7 +18,8 @@ final class FavoritesStore {
         self.fileURL = fileURL
         if let fileURL, let data = try? Data(contentsOf: fileURL),
            let stored = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Double] {
-            entries = stored
+            entries = Dictionary(stored.map { (PathKey.migrate($0.key), $0.value) }, uniquingKeysWith: max)
+            if entries.keys.sorted() != stored.keys.sorted() { save() }
         }
     }
 
@@ -26,18 +27,36 @@ final class FavoritesStore {
 
     /// Favourite file URLs, most recently added first.
     var urls: [URL] {
-        entries.sorted { $0.value > $1.value }.map { URL(fileURLWithPath: $0.key) }
+        entries.sorted { $0.value > $1.value }.map { PathKey.url($0.key) }
     }
 
     func contains(_ url: URL) -> Bool {
         entries[Self.key(url)] != nil
     }
 
+    /// Snapshot of all keys, for filtering large lists off the main thread with `key(path:)`.
+    var keys: Set<String> { Set(entries.keys) }
+
     @discardableResult
     func toggle(_ url: URL) -> Bool {
         let isFavorite = !contains(url)
         set(url, favorite: isFavorite)
         return isFavorite
+    }
+
+    /// Bulk change with a single save and notification.
+    func set(_ urls: [URL], favorite: Bool) {
+        let now = Date().timeIntervalSince1970
+        for url in urls { entries[Self.key(url)] = favorite ? now : nil }
+        save()
+        NotificationCenter.default.post(name: Self.didChange, object: nil)
+    }
+
+    /// Keeps favourites attached to files that were moved or renamed by the app.
+    func move(from old: URL, to new: URL) {
+        guard let added = entries.removeValue(forKey: Self.key(old)) else { return }
+        entries[Self.key(new)] = added
+        save()
     }
 
     func set(_ url: URL, favorite: Bool) {
@@ -48,10 +67,13 @@ final class FavoritesStore {
         NotificationCenter.default.post(name: Self.didChange, object: url)
     }
 
-    /// The same file can surface as `/private/var/…` or `/var/…` depending on how its folder was opened.
     static func key(_ url: URL) -> String {
-        let path = url.standardizedFileURL.path
-        return path.hasPrefix("/private/var/") ? String(path.dropFirst("/private".count)) : path
+        key(path: url.standardizedFileURL.path)
+    }
+
+    /// Cheap variant for paths that are already standardized (e.g. from a directory enumerator).
+    static func key(path: String) -> String {
+        PathKey.make(path)
     }
 
     private func save() {
@@ -84,7 +106,8 @@ final class FavoriteFoldersStore {
         self.fileURL = fileURL
         if let fileURL, let data = try? Data(contentsOf: fileURL),
            let stored = try? JSONDecoder().decode([FavoriteFolder].self, from: data) {
-            items = stored
+            items = stored.map { var folder = $0; folder.path = PathKey.migrate(folder.path); return folder }
+            if items != stored { save() }
         }
     }
 
@@ -115,7 +138,7 @@ final class FavoriteFoldersStore {
 
     func remove(_ id: UUID) {
         guard let folder = items.first(where: { $0.id == id }) else { return }
-        set(URL(fileURLWithPath: folder.path), favorite: false)
+        set(PathKey.url(folder.path), favorite: false)
     }
 
     /// The folder's URL, preferring its own bookmark so it survives being reached through a different path.
@@ -125,7 +148,7 @@ final class FavoriteFoldersStore {
            let url = try? URL(resolvingBookmarkData: bookmark, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) {
             return url
         }
-        return URL(fileURLWithPath: folder.path, isDirectory: true)
+        return PathKey.url(folder.path)
     }
 
     private func save() {

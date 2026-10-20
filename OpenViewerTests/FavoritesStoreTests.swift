@@ -60,3 +60,25 @@ final class FavoriteFoldersStoreTests: XCTestCase {
         XCTAssertTrue(FavoriteFoldersStore(fileURL: file).items.isEmpty)
     }
 }
+
+final class PathKeyTests: XCTestCase {
+    func testAppContainerPathsAreRelative() {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let file = documents.appendingPathComponent("Art/hornet.png")
+        let key = PathKey.make(file.path)
+        XCTAssertEqual(key, "~/Documents/Art/hornet.png")
+        XCTAssertEqual(PathKey.url(key).path, file.path)
+    }
+
+    func testOtherPathsStayAbsolute() {
+        XCTAssertEqual(PathKey.make("/private/var/mobile/Library/Mobile Documents/x.png"), "/var/mobile/Library/Mobile Documents/x.png")
+    }
+
+    func testMigratesKeysFromAnOldContainer() {
+        let old = "/private/var/mobile/Containers/Data/Application/1DD8854D-4E0D-433B-BDB6-A0DB772E6C3D/Documents/Fotos/a.jpg"
+        XCTAssertEqual(PathKey.migrate(old), "~/Documents/Fotos/a.jpg")
+        let simulator = "/Users/me/Library/Developer/CoreSimulator/Devices/X/data/Containers/Data/Application/E7459E73-90DC-4048-BA7E-351762F2BA0E/Documents/Fotos"
+        XCTAssertEqual(PathKey.migrate(simulator), "~/Documents/Fotos")
+        XCTAssertEqual(PathKey.migrate("~/Documents/b.png"), "~/Documents/b.png")
+    }
+}

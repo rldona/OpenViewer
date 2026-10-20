@@ -74,11 +74,46 @@ final class OpenViewerTests: XCTestCase {
         }
         wait(for: [loaded], timeout: 5)
         XCTAssertNotNil(pipeline.cachedImage(for: request))
-        pipeline.clearDisk()
+        pipeline.removeDiskCache()
+    }
+
+    func testDiskCachePreservesTransparencyAndDetail() throws {
+        let width = 600
+        let context = CGContext(data: nil, width: width, height: width, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(UIColor.white.cgColor)
+        context.fillEllipse(in: CGRect(x: 150, y: 150, width: 300, height: 300))
+        let sprite = root.appendingPathComponent("sprite.png")
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(sprite as CFURL, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+
+        let pipeline = ImagePipeline(name: "test-\(UUID().uuidString)", diskCache: true, memoryLimit: 10 << 20, concurrency: 2)
+        defer { pipeline.removeDiskCache() }
+        let request = ImagePipeline.Request(url: sprite, maxPixel: 256)
+        func load() throws -> CGImage {
+            let done = expectation(description: "load")
+            var image: CGImage?
+            pipeline.load(request) { image = $0?.cgImage; done.fulfill() }
+            wait(for: [done], timeout: 5)
+            return try XCTUnwrap(image)
+        }
+        _ = try load()
+        Thread.sleep(forTimeInterval: 0.5) // disk write is asynchronous
+        pipeline.clearMemory()
+        let cached = try load()
+
+        var corner = [UInt8](repeating: 255, count: 4)
+        let probe = CGContext(data: &corner, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                              space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        probe.setBlendMode(.copy) // replace, don't composite over the probe's initial value
+        probe.draw(cached, in: CGRect(x: 0, y: 0, width: cached.width, height: cached.height))
+        XCTAssertEqual(corner[3], 0, "a transparent corner must stay transparent when read back from the disk cache")
     }
 
     func testPipelineCancellationNeverCallsBack() {
         let pipeline = ImagePipeline(name: "test-\(UUID().uuidString)", diskCache: false, memoryLimit: 10 << 20, concurrency: 2)
+        defer { pipeline.removeDiskCache() }
         pipeline.queueSuspendedForTesting = true
         let request = ImagePipeline.Request(url: root.appendingPathComponent("a/b/big.png"), maxPixel: 128)
         let token = pipeline.load(request) { _ in XCTFail("cancelled request must not complete") }

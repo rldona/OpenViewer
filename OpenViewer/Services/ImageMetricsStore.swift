@@ -38,13 +38,13 @@ final class ImageMetricsStore {
     func metrics(for url: URL) -> ImageMetrics? {
         lock.lock()
         defer { lock.unlock() }
-        guard let values = entries[url.path], values.count == 2 else { return nil }
+        guard let values = entries[PathKey.make(url.path)], values.count == 2 else { return nil }
         return ImageMetrics(ratio: CGFloat(values[0]), maxSide: Int(values[1]))
     }
 
     func set(_ metrics: ImageMetrics, for url: URL) {
         lock.lock()
-        entries[url.path] = [Float(metrics.ratio), Float(metrics.maxSide)]
+        entries[PathKey.make(url.path)] = [Float(metrics.ratio), Float(metrics.maxSide)]
         dirty = true
         lock.unlock()
     }
@@ -80,7 +80,7 @@ final class ImageMetricsStore {
 /// queue in batches. Results are written straight to `ImageMetricsStore`.
 final class MetricsResolver {
     private let urls: [URL]
-    private var handedOut: [Bool]
+    private var handedOut: [Bool] = []
     private var cursor = 0
     private var priority: Range<Int>?
     private var pendingCount = 0
@@ -89,15 +89,26 @@ final class MetricsResolver {
     private let lock = NSLock()
     private let onBatch: () -> Void
 
-    /// `known[i]` is true when `urls[i]` already has metrics in the store.
-    init(urls: [URL], known: [Bool], onBatch: @escaping () -> Void) {
+    init(urls: [URL], onBatch: @escaping () -> Void) {
         self.urls = urls
-        self.handedOut = known
         self.onBatch = onBatch
     }
 
+    /// Everything, including checking which items are already cached, runs off the main thread.
     func start(workers: Int = 4) {
-        guard handedOut.contains(false) else { return }
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let store = ImageMetricsStore.shared
+            let known = urls.map { store.metrics(for: $0) != nil }
+            lock.lock()
+            handedOut = known
+            let isCancelled = cancelled
+            lock.unlock()
+            guard !isCancelled, known.contains(false) else { return }
+            spawn(workers: workers)
+        }
+    }
+
+    private func spawn(workers: Int) {
         let group = DispatchGroup()
         for _ in 0..<workers {
             DispatchQueue.global(qos: .utility).async(group: group) { [self] in
@@ -130,7 +141,7 @@ final class MetricsResolver {
         lock.lock()
         defer { lock.unlock() }
         guard !cancelled else { return nil }
-        if let range = priority {
+        if let range = priority?.clamped(to: 0..<handedOut.count) {
             if let index = range.first(where: { !handedOut[$0] }) {
                 handedOut[index] = true
                 return index

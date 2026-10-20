@@ -24,6 +24,8 @@ behind the design.
 - **Justified grid** like Google Photos, where every image keeps its proportions, or a square grid. Pinch or press ⌘+ / ⌘− to resize, sort by natural name, date or size, and filter by name.
 - **Full-screen viewer**: swipe between images, double-tap or pinch to zoom, zoom transition from the grid, and swipe down to close.
 - **Favorites**: tap ♥︎ in the viewer, press F, or long-press a thumbnail. Filter any folder with *Favorites Only*, or open *Favorites* on the start screen to see favorites from all your folders. Folders can be favorited too (long-press a folder, or *Add Folder to Favorites* in the menu) and appear as shortcuts on the start screen. Favorites are stored inside the app and image files are never modified.
+- **Select multiple images** like in Photos: tap *Select*, then tap or swipe across thumbnails (the grid scrolls by itself near the edges). Share them, add or remove favorites, put them in a new folder, or copy or move them anywhere the Files app can reach. ⌘A selects everything.
+- **Compare two images**: select two and tap *Compare*. *Overlay* places B over A with an opacity slider, *Swipe* adds a draggable divider, and *Side by Side* keeps zoom and pan in sync. It is ideal for checking a scene's art against its collision map. Space flips between A and B, 1/2/3 switch modes and X swaps them.
 - **Made for sprites and extracted assets**: choose a checkerboard, gray, black or white background for transparent images (*Transparency* in the menu, or B in the viewer), and hide tiny files with *Image Size* (for example, everything under 64 px).
 - **Scrubber** to jump anywhere in collections with thousands of images.
 - **Slideshow** at 2, 3, 5 or 10 seconds (long-press the play button).
@@ -75,7 +77,7 @@ docs/MARKET_STUDY.md
 ## Roadmap
 
 - On-demand download of iCloud files that are not stored locally
-- Filmstrip and side-by-side compare
+- Filmstrip view
 - Ratings and tags stored separately (files are never modified)
 - ZIP/CBZ support
 - External display output

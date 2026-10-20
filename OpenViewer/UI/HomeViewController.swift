@@ -73,7 +73,9 @@ final class HomeViewController: UIViewController {
                 content.imageProperties.tintColor = .systemPink
             case .favoriteFolder(let folder):
                 content.text = folder.name
-                content.secondaryText = URL(fileURLWithPath: folder.path).deletingLastPathComponent().lastPathComponent
+                let parent = PathKey.url(folder.path).deletingLastPathComponent()
+                content.secondaryText = parent.path == FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path
+                    ? "On My iPad" : parent.lastPathComponent
                 content.image = UIImage(systemName: "folder.fill")
                 content.imageProperties.tintColor = .systemPink
             case .recent(let bookmark):

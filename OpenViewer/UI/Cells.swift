@@ -7,6 +7,11 @@ final class ThumbnailCell: UICollectionViewCell {
     private let imageView = UIImageView()
     private let favoriteBadge = UIImageView(image: UIImage(systemName: "heart.fill",
                                                            withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)))
+    private let selectionDim = UIView()
+    private let checkmark = UIImageView(image: UIImage(
+        systemName: "checkmark.circle.fill",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+            .applying(UIImage.SymbolConfiguration(paletteColors: [.white, .systemBlue]))))
     private var token: LoadToken?
     private var representedURL: URL?
 
@@ -28,9 +33,23 @@ final class ThumbnailCell: UICollectionViewCell {
         favoriteBadge.isHidden = true
         favoriteBadge.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(favoriteBadge)
+        selectionDim.backgroundColor = UIColor(white: 0, alpha: 0.25)
+        selectionDim.isHidden = true
+        selectionDim.frame = contentView.bounds
+        selectionDim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentView.addSubview(selectionDim)
+        checkmark.isHidden = true
+        checkmark.layer.shadowColor = UIColor.black.cgColor
+        checkmark.layer.shadowOpacity = 0.35
+        checkmark.layer.shadowRadius = 2
+        checkmark.layer.shadowOffset = .zero
+        checkmark.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(checkmark)
         NSLayoutConstraint.activate([
             favoriteBadge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
             favoriteBadge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            checkmark.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
+            checkmark.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
         ])
         isAccessibilityElement = true
         accessibilityTraits = .image
@@ -40,6 +59,14 @@ final class ThumbnailCell: UICollectionViewCell {
 
     override var isHighlighted: Bool {
         didSet { contentView.alpha = isHighlighted ? 0.6 : 1 }
+    }
+
+    override var isSelected: Bool {
+        didSet {
+            checkmark.isHidden = !isSelected
+            selectionDim.isHidden = !isSelected
+            accessibilityTraits = isSelected ? [.image, .selected] : .image
+        }
     }
 
     func configure(with item: ImageItem, pixelSize: Int) {

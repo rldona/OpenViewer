@@ -83,9 +83,8 @@ final class ViewerViewController: UIViewController {
     }
 
     override var canBecomeFirstResponder: Bool { true }
-    override var prefersStatusBarHidden: Bool { chromeHidden }
+    override var prefersStatusBarHidden: Bool { true }
     override var prefersHomeIndicatorAutoHidden: Bool { chromeHidden }
-    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { .fade }
 
     // MARK: Chrome
 
@@ -207,7 +206,6 @@ final class ViewerViewController: UIViewController {
         UIView.animate(withDuration: 0.2) {
             self.topBar.alpha = hidden ? 0 : 1
             self.bottomBar.alpha = hidden ? 0 : 1
-            self.setNeedsStatusBarAppearanceUpdate()
         }
         setNeedsUpdateOfHomeIndicatorAutoHidden()
     }

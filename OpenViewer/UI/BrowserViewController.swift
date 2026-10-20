@@ -1,3 +1,4 @@
+import os
 import UIKit
 
 /// Grid of a folder's subfolders and images, or — with "Include Subfolders" — every image in the tree.
@@ -23,6 +24,10 @@ final class BrowserViewController: UIViewController {
     private var images: [ImageItem] = []
     private var query = ""
     private var isScanning = false
+    /// True while a cached tree is on screen and being checked for changes in the background.
+    private var isRevalidating = false
+    /// Recursive results in tree order (each folder's images, then its subfolders, by name).
+    private var treeOrder: [ImageItem] = []
     private var scanFlag: CancelFlag?
 
     private var includeSubfolders = Settings.includeSubfolders
@@ -31,13 +36,39 @@ final class BrowserViewController: UIViewController {
     /// Aspect ratio of each entry in `images`; placeholders until resolved.
     private var ratios: [CGFloat] = []
     private var resolver: MetricsResolver?
-    /// `images[i] == allImages[sourceIndices[i]]`, so visible items can be prioritised by the resolver.
+    /// Images that pass the name and favourites filters, before the size filter. The metrics resolver works on these.
+    private var baseImages: [ImageItem] = []
+    /// `images[i] == baseImages[sourceIndices[i]]`, so visible items can be prioritised by the resolver.
     private var sourceIndices: [Int] = []
     private var hiddenSmallCount = 0
+    /// Filtering runs here so huge lists never block the main thread.
+    private let filterQueue = DispatchQueue(label: "openviewer.filter", qos: .userInitiated)
+    private var filterGeneration = 0
+    /// Latest requested generation, readable from the filter queue.
+    private let latestFilter = OSAllocatedUnfairLock(initialState: 0)
+    private var lastResolverStart: CFAbsoluteTime = 0
     private var minimumSide = Settings.minimumImageSide
     private var contentGeneration = 0
     private var prefetchTokens: [IndexPath: LoadToken] = [:]
     private var menuButton: UIBarButtonItem!
+    private var normalRightItems: [UIBarButtonItem] = []
+
+    // Selection mode
+    private(set) var isSelecting = false
+    private var selectedURLs = Set<URL>()
+    private let selectionLabel = UILabel()
+    private var shareSelectionButton: UIBarButtonItem!
+    private var favoriteSelectionButton: UIBarButtonItem!
+    private var folderSelectionButton: UIBarButtonItem!
+    private var compareSelectionButton: UIBarButtonItem!
+    /// Sources of a "Copy to…" / "Move to…" in progress, and whether it moves them.
+    private var pendingExport: (sources: [URL], isMove: Bool)?
+    /// Photos-style swipe selection: a horizontal drag selects (or deselects) the range it covers.
+    private let selectionPan = UIPanGestureRecognizer()
+    private var dragSelection: (start: Int, last: Int, selecting: Bool, original: Set<URL>)?
+    private var autoScrollLink: CADisplayLink?
+    private var autoScrollSpeed: CGFloat = 0
+    private var lastPanLocation: CGPoint = .zero
 
     init(folderURL: URL, displayName: String? = nil) {
         self.folderURL = folderURL
@@ -107,7 +138,14 @@ final class BrowserViewController: UIViewController {
         let slideshow = UIBarButtonItem(image: UIImage(systemName: "play.rectangle"), style: .plain,
                                         target: self, action: #selector(startSlideshow))
         slideshow.accessibilityLabel = "Slideshow"
-        navigationItem.rightBarButtonItems = [menuButton, slideshow]
+        let select = UIBarButtonItem(title: "Select", style: .plain, target: self, action: #selector(enterSelection))
+        normalRightItems = [menuButton, slideshow, select]
+        navigationItem.rightBarButtonItems = normalRightItems
+        collectionView.allowsMultipleSelectionDuringEditing = true
+        selectionPan.addTarget(self, action: #selector(handleSelectionPan(_:)))
+        selectionPan.delegate = self
+        collectionView.addGestureRecognizer(selectionPan)
+        setupSelectionToolbar()
 
         NotificationCenter.default.addObserver(self, selector: #selector(favoritesChanged(_:)),
                                                name: FavoritesStore.didChange, object: nil)
@@ -152,7 +190,8 @@ final class BrowserViewController: UIViewController {
             UIKeyCommand(title: "Search", action: #selector(focusSearch), input: "f", modifierFlags: .command),
             UIKeyCommand(title: "Slideshow", action: #selector(startSlideshow), input: "p", modifierFlags: .command),
             UIKeyCommand(title: "Back", action: #selector(goBack), input: UIKeyCommand.inputLeftArrow, modifierFlags: .command),
-        ]
+            UIKeyCommand(title: "Select All", action: #selector(selectAllFromKeyboard), input: "a", modifierFlags: .command),
+        ] + (isSelecting ? [UIKeyCommand(title: "Done", action: #selector(exitSelection), input: UIKeyCommand.inputEscape)] : [])
     }
 
     // MARK: Loading
@@ -196,35 +235,63 @@ final class BrowserViewController: UIViewController {
                 return
             }
 
-            var found: [ImageItem] = []
-            FolderScanner.scanRecursively(url, isCancelled: { flag.cancelled }) { batch in
-                found.append(contentsOf: batch)
-                let snapshot = found
+            // 1. Show the last known tree instantly.
+            let previous = ScanCache.load(root: url)
+            if let previous {
+                let cached = previous.images(root: url)
+                let ordered = Self.ordered(cached, by: order)
                 DispatchQueue.main.async {
                     guard let self, !flag.cancelled else { return }
-                    self.setContent(folders: [], images: snapshot)
+                    self.isRevalidating = true
+                    self.treeOrder = cached
+                    self.setContent(folders: [], images: ordered)
                 }
             }
-            guard !flag.cancelled else { return }
-            let sorted = found.sorted(by: order, byPath: true)
+
+            // 2. Revalidate in the background, re-listing only folders that changed.
+            let result = IncrementalScanner.scan(root: url, previous: previous, isCancelled: { flag.cancelled }) { partial in
+                guard previous == nil else { return }
+                DispatchQueue.main.async {
+                    guard let self, !flag.cancelled else { return }
+                    self.treeOrder = partial
+                    self.setContent(folders: [], images: partial)
+                }
+            }
+            guard let result, !flag.cancelled else { return }
+            let changed = previous == nil || result.changedDirectories > 0
+            if changed { ScanCache.save(result.snapshot, root: url) }
+            let ordered = changed ? Self.ordered(result.images, by: order) : nil
             DispatchQueue.main.async {
                 guard let self, !flag.cancelled else { return }
                 self.isScanning = false
-                self.setContent(folders: [], images: sorted)
+                self.isRevalidating = false
+                if let ordered {
+                    self.treeOrder = result.images
+                    self.setContent(folders: [], images: ordered)
+                } else {
+                    self.updateStatus()
+                    self.startResolverIfNeeded(force: true)
+                }
             }
         }
+    }
+
+    /// Name order comes straight from the tree walk; other orders are sorted (numeric, cheap).
+    private static func ordered(_ treeOrder: [ImageItem], by order: SortOrder) -> [ImageItem] {
+        guard order.key != .name else { return order.ascending ? treeOrder : treeOrder.reversed() }
+        return treeOrder.sorted(by: order)
     }
 
     /// Re-sorts what is already loaded without touching the file system.
     private func resort() {
         guard !isScanning else { reload(); return }
         let order = Settings.sortOrder
-        let recursive = includeSubfolders || isFavoritesView
+        let fromTree = includeSubfolders && !isFavoritesView
         let folders = allFolders
-        let images = allImages
+        let images = fromTree ? treeOrder : allImages
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let sortedFolders = folders.sorted(by: SortOrder(key: order.key == .size ? .name : order.key, ascending: order.ascending))
-            let sortedImages = images.sorted(by: order, byPath: recursive)
+            let sortedImages = fromTree ? Self.ordered(images, by: order) : images.sorted(by: order, byPath: self?.isFavoritesView ?? false)
             DispatchQueue.main.async {
                 self?.setContent(folders: sortedFolders, images: sortedImages)
             }
@@ -234,45 +301,107 @@ final class BrowserViewController: UIViewController {
     private func setContent(folders: [FolderItem], images: [ImageItem]) {
         allFolders = folders
         allImages = images
-        startResolver()
         applyFilter()
     }
 
-    private func applyFilter() {
-        let store = ImageMetricsStore.shared
-        let favorites = FavoritesStore.shared
+    /// Rebuilds the visible lists from `allImages` on a background queue and applies the result.
+    /// Requests that arrive while one is running supersede it.
+    private func applyFilter(keepPosition: Bool = false, restartResolver: Bool = true) {
+        filterGeneration += 1
+        let generation = filterGeneration
+        latestFilter.withLock { $0 = generation }
+        let latestFilter = self.latestFilter
+        let allImages = self.allImages
+        let allFolders = self.allFolders
+        let query = self.query
+        let favoriteKeys: Set<String>? = showsOnlyFavorites ? FavoritesStore.shared.keys : nil
         let minimumSide = self.minimumSide
-        folders = query.isEmpty ? allFolders : allFolders.filter { $0.name.localizedCaseInsensitiveContains(query) }
-        if isFavoritesView { folders = [] }
+        let isFavoritesView = self.isFavoritesView
 
-        var images: [ImageItem] = []
-        var sourceIndices: [Int] = []
-        var ratios: [CGFloat] = []
-        var hidden = 0
-        images.reserveCapacity(allImages.count)
-        for (index, item) in allImages.enumerated() {
-            if !query.isEmpty && !item.name.localizedCaseInsensitiveContains(query) { continue }
-            if showsOnlyFavorites && !favorites.contains(item.url) { continue }
-            let metrics = store.metrics(for: item.url)
-            // Unknown sizes stay visible until the resolver has read them.
-            if minimumSide > 0, let metrics, metrics.maxSide > 0, metrics.maxSide < minimumSide {
-                hidden += 1
-                continue
+        filterQueue.async { [weak self] in
+            // A newer request is already queued: skip this one.
+            guard latestFilter.withLock({ $0 }) == generation else { return }
+
+            var folders = query.isEmpty ? allFolders : allFolders.filter { $0.name.localizedCaseInsensitiveContains(query) }
+            if isFavoritesView { folders = [] }
+
+            var base: [ImageItem] = []
+            base.reserveCapacity(favoriteKeys == nil ? allImages.count : 64)
+            for item in allImages {
+                if let favoriteKeys, !favoriteKeys.contains(FavoritesStore.key(path: item.url.path)) { continue }
+                if !query.isEmpty && !item.name.localizedCaseInsensitiveContains(query) { continue }
+                base.append(item)
             }
-            images.append(item)
-            sourceIndices.append(index)
-            ratios.append(metrics?.ratio ?? ImageMetricsStore.placeholderRatio)
-        }
-        self.images = images
-        self.sourceIndices = sourceIndices
-        self.ratios = ratios
-        hiddenSmallCount = hidden
 
+            let store = ImageMetricsStore.shared
+            var images: [ImageItem] = []
+            var sourceIndices: [Int] = []
+            var ratios: [CGFloat] = []
+            var hidden = 0
+            images.reserveCapacity(base.count)
+            for (index, item) in base.enumerated() {
+                let metrics = store.metrics(for: item.url)
+                // Unknown sizes stay visible until the resolver has read them.
+                if minimumSide > 0, let metrics, metrics.maxSide > 0, metrics.maxSide < minimumSide {
+                    hidden += 1
+                    continue
+                }
+                images.append(item)
+                sourceIndices.append(index)
+                ratios.append(metrics?.ratio ?? ImageMetricsStore.placeholderRatio)
+            }
+
+            DispatchQueue.main.async {
+                guard let self, self.filterGeneration == generation else { return }
+                self.applyFiltered(folders: folders, base: base, images: images, sourceIndices: sourceIndices,
+                                   ratios: ratios, hidden: hidden, keepPosition: keepPosition)
+                if restartResolver { self.startResolverIfNeeded() }
+            }
+        }
+    }
+
+    private func applyFiltered(folders: [FolderItem], base: [ImageItem], images: [ImageItem], sourceIndices: [Int],
+                               ratios: [CGFloat], hidden: Int, keepPosition: Bool) {
+        let sameList = folders.count == self.folders.count && images.count == self.images.count
+            && images.first?.url == self.images.first?.url && images.last?.url == self.images.last?.url
+        self.baseImages = base
+        self.sourceIndices = sourceIndices
+        self.hiddenSmallCount = hidden
+        self.folders = folders
+
+        if keepPosition && sameList {
+            // Only proportions changed: relayout in place.
+            self.images = images
+            self.ratios = ratios
+            relayoutKeepingPosition(animated: false) { self.layout.ratios = ratios }
+            updateStatus()
+            return
+        }
+
+        let offsetY = collectionView.contentOffset.y
+        let atTop = offsetY <= -collectionView.adjustedContentInset.top + 1
+        let anchorIndex = keepPosition
+            ? collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }.map(\.item).min()
+            : nil
+        let anchorURL = anchorIndex.flatMap { self.images.indices.contains($0) ? self.images[$0].url : nil }
+        let oldMinY = anchorIndex.flatMap { layout.imageFrame(at: $0)?.minY }
+
+        self.images = images
+        self.ratios = ratios
         prefetchTokens.values.forEach { ImagePipeline.thumbnails.cancel($0) }
         prefetchTokens.removeAll()
         layout.ratios = ratios
         collectionView.reloadData()
+        restoreSelection()
         updateStatus()
+
+        guard keepPosition, !atTop, let anchorURL, let oldMinY else { return }
+        collectionView.layoutIfNeeded()
+        guard let newIndex = images.firstIndex(where: { $0.url == anchorURL }),
+              let newMinY = layout.imageFrame(at: newIndex)?.minY else { return }
+        let maxOffset = max(-collectionView.adjustedContentInset.top,
+                            collectionView.contentSize.height - collectionView.bounds.height + collectionView.adjustedContentInset.bottom)
+        collectionView.contentOffset.y = min(offsetY + newMinY - oldMinY, maxOffset)
     }
 
     // MARK: Image metrics
@@ -280,18 +409,19 @@ final class BrowserViewController: UIViewController {
     private var needsMetrics: Bool { layout.style == .justified || minimumSide > 0 }
 
     /// Reads unknown image sizes from file headers in the background, visible items first.
-    private func startResolver() {
+    /// While a big tree is still being scanned it restarts at most every few seconds.
+    private func startResolverIfNeeded(force: Bool = false) {
+        let now = CFAbsoluteTimeGetCurrent()
+        if isScanning && !force && resolver != nil && now - lastResolverStart < 3 { return }
         resolver?.cancel()
         resolver = nil
         contentGeneration += 1
-        guard needsMetrics else { return }
-        let store = ImageMetricsStore.shared
-        let known = allImages.map { store.metrics(for: $0.url) != nil }
-        guard known.contains(false) else { return }
+        guard needsMetrics, !baseImages.isEmpty else { return }
+        lastResolverStart = now
         let generation = contentGeneration
-        let resolver = MetricsResolver(urls: allImages.map(\.url), known: known) { [weak self] in
+        let resolver = MetricsResolver(urls: baseImages.map(\.url)) { [weak self] in
             guard let self, generation == self.contentGeneration else { return }
-            self.metricsResolved()
+            self.applyFilter(keepPosition: true, restartResolver: false)
         }
         self.resolver = resolver
         prioritizeVisible()
@@ -299,48 +429,14 @@ final class BrowserViewController: UIViewController {
     }
 
     private func prioritizeVisible() {
-        guard let resolver, let visible = visibleImageRange(), !visible.isEmpty else {
-            if let resolver, !allImages.isEmpty { resolver.prioritize(0..<min(allImages.count, 120)) }
+        guard let resolver else { return }
+        guard let visible = visibleImageRange(), !visible.isEmpty, visible.upperBound <= sourceIndices.count else {
+            resolver.prioritize(0..<min(baseImages.count, 120))
             return
         }
         let low = sourceIndices[visible.lowerBound]
         let high = sourceIndices[visible.upperBound - 1]
         resolver.prioritize(low..<(high + 1))
-    }
-
-    private func metricsResolved() {
-        if minimumSide > 0 {
-            // Items may disappear: rebuild the list, keeping the first visible image in place.
-            refilterKeepingPosition()
-            return
-        }
-        let store = ImageMetricsStore.shared
-        var changed = false
-        for (index, item) in images.enumerated() {
-            if let ratio = store.metrics(for: item.url)?.ratio, abs(ratios[index] - ratio) > 0.001 {
-                ratios[index] = ratio
-                changed = true
-            }
-        }
-        guard changed else { return }
-        relayoutKeepingPosition(animated: false) { self.layout.ratios = self.ratios }
-    }
-
-    private func refilterKeepingPosition() {
-        let offsetY = collectionView.contentOffset.y
-        let atTop = offsetY <= -collectionView.adjustedContentInset.top + 1
-        let anchorIndex = collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }.map(\.item).min()
-        let anchorURL = anchorIndex.map { images[$0].url }
-        let oldMinY = anchorIndex.flatMap { layout.imageFrame(at: $0)?.minY }
-
-        applyFilter()
-        collectionView.layoutIfNeeded()
-        guard !atTop, let anchorURL, let oldMinY,
-              let newIndex = images.firstIndex(where: { $0.url == anchorURL }),
-              let newMinY = layout.imageFrame(at: newIndex)?.minY else { return }
-        let maxOffset = max(-collectionView.adjustedContentInset.top,
-                            collectionView.contentSize.height - collectionView.bounds.height + collectionView.adjustedContentInset.bottom)
-        collectionView.contentOffset.y = min(offsetY + newMinY - oldMinY, maxOffset)
     }
 
     private func visibleImageRange(margin: Int = 60) -> Range<Int>? {
@@ -385,7 +481,11 @@ final class BrowserViewController: UIViewController {
         if !folders.isEmpty { parts.append("\(folders.count.formatted()) folder\(folders.count == 1 ? "" : "s")") }
         parts.append("\(images.count.formatted()) image\(images.count == 1 ? "" : "s")")
         if hiddenSmallCount > 0 { parts.append("\(hiddenSmallCount.formatted()) small hidden") }
-        if isScanning { parts.append(includeSubfolders ? "scanning…" : "loading…") }
+        if isRevalidating {
+            parts.append("checking for changes…")
+        } else if isScanning {
+            parts.append(includeSubfolders ? "scanning…" : "loading…")
+        }
         if includeSubfolders && !isFavoritesView { parts.insert("All subfolders", at: 0) }
         if favoritesOnly { parts.insert("Favorites", at: 0) }
         titleView.subtitleLabel.text = parts.joined(separator: " · ")
@@ -402,6 +502,7 @@ final class BrowserViewController: UIViewController {
         } else {
             collectionView.backgroundView = nil
         }
+        if isSelecting { updateSelectionUI() }
     }
 
     // MARK: Layout
@@ -420,7 +521,7 @@ final class BrowserViewController: UIViewController {
         Settings.gridStyle = style
         relayoutKeepingPosition(animated: true) { self.layout.style = style }
         menuButton.menu = makeMenu()
-        startResolver()
+        startResolverIfNeeded(force: true)
     }
 
     @objc private func handlePinch(_ pinch: UIPinchGestureRecognizer) {
@@ -496,6 +597,8 @@ final class BrowserViewController: UIViewController {
             })
         }
         let refresh = UIAction(title: "Refresh", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+            // Forget the cached tree so everything is listed again.
+            if let url = self?.folderURL { ScanCache.remove(root: url) }
             FolderInfoCache.shared.invalidate()
             self?.reload()
         }
@@ -520,7 +623,6 @@ final class BrowserViewController: UIViewController {
         minimumSide = side
         Settings.minimumImageSide = side
         menuButton.menu = makeMenu()
-        startResolver()
         applyFilter()
     }
 
@@ -574,6 +676,370 @@ final class BrowserViewController: UIViewController {
     }
 }
 
+// MARK: - Selection
+
+extension BrowserViewController: UIDocumentPickerDelegate {
+    private func setupSelectionToolbar() {
+        selectionLabel.font = .preferredFont(forTextStyle: .headline)
+        selectionLabel.textAlignment = .center
+        shareSelectionButton = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain,
+                                               target: self, action: #selector(shareSelection))
+        shareSelectionButton.accessibilityLabel = "Share"
+        favoriteSelectionButton = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain,
+                                                  target: self, action: #selector(toggleFavoriteSelection))
+        favoriteSelectionButton.accessibilityLabel = "Favorite"
+        folderSelectionButton = UIBarButtonItem(image: UIImage(systemName: "folder.badge.plus"), menu: nil)
+        folderSelectionButton.accessibilityLabel = "Copy or Move"
+        compareSelectionButton = UIBarButtonItem(image: UIImage(systemName: "square.split.2x1"), style: .plain,
+                                                 target: self, action: #selector(compareSelection))
+        compareSelectionButton.accessibilityLabel = "Compare"
+        toolbarItems = [
+            shareSelectionButton,
+            .fixedSpace(16),
+            compareSelectionButton,
+            .flexibleSpace(),
+            UIBarButtonItem(customView: selectionLabel),
+            .flexibleSpace(),
+            favoriteSelectionButton,
+            .fixedSpace(16),
+            folderSelectionButton,
+        ]
+    }
+
+    @objc func enterSelection() {
+        guard !isSelecting else { return }
+        isSelecting = true
+        collectionView.allowsMultipleSelection = true
+        collectionView.isEditing = true
+        navigationItem.hidesBackButton = true
+        navigationItem.rightBarButtonItems = [
+            UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in self?.exitSelection() }),
+            UIBarButtonItem(title: "Select All", primaryAction: UIAction { [weak self] _ in self?.toggleSelectAll() }),
+        ]
+        navigationController?.setToolbarHidden(false, animated: true)
+        updateSelectionUI()
+    }
+
+    @objc func exitSelection() {
+        guard isSelecting else { return }
+        isSelecting = false
+        selectedURLs.removeAll()
+        for indexPath in collectionView.indexPathsForSelectedItems ?? [] {
+            collectionView.deselectItem(at: indexPath, animated: false)
+        }
+        collectionView.isEditing = false
+        collectionView.allowsMultipleSelection = false
+        navigationItem.hidesBackButton = false
+        navigationItem.rightBarButtonItems = normalRightItems
+        navigationController?.setToolbarHidden(true, animated: true)
+        updateStatus()
+    }
+
+    @objc private func selectAllFromKeyboard() {
+        enterSelection()
+        if selectedURLs.count != images.count { toggleSelectAll() }
+    }
+
+    private func toggleSelectAll() {
+        if !images.isEmpty && selectedURLs.count == images.count {
+            selectedURLs.removeAll()
+            for indexPath in collectionView.indexPathsForSelectedItems ?? [] {
+                collectionView.deselectItem(at: indexPath, animated: false)
+            }
+        } else {
+            selectedURLs = Set(images.map(\.url))
+            restoreSelection()
+        }
+        updateSelectionUI()
+    }
+
+    /// Re-applies `selectedURLs` after the list was rebuilt, dropping items that are no longer shown.
+    private func restoreSelection() {
+        guard isSelecting, !selectedURLs.isEmpty else { return }
+        var kept = Set<URL>()
+        for (index, item) in images.enumerated() where selectedURLs.contains(item.url) {
+            kept.insert(item.url)
+            collectionView.selectItem(at: IndexPath(item: index, section: Section.images.rawValue), animated: false, scrollPosition: [])
+        }
+        selectedURLs = kept
+        updateSelectionUI()
+    }
+
+    // MARK: Swipe to select
+
+    private func imageIndex(at pointInCollectionView: CGPoint) -> Int? {
+        guard let indexPath = collectionView.indexPathForItem(at: pointInCollectionView),
+              indexPath.section == Section.images.rawValue, indexPath.item < images.count else { return nil }
+        return indexPath.item
+    }
+
+    @objc private func handleSelectionPan(_ pan: UIPanGestureRecognizer) {
+        switch pan.state {
+        case .began:
+            guard let start = imageIndex(at: pan.location(in: collectionView)) else {
+                pan.state = .cancelled
+                return
+            }
+            let selecting = !selectedURLs.contains(images[start].url)
+            dragSelection = (start, start, selecting, selectedURLs)
+            applyDragSelection(to: start, previous: start)
+        case .changed:
+            lastPanLocation = pan.location(in: view)
+            extendDragSelection()
+            updateAutoScroll()
+        default:
+            dragSelection = nil
+            stopAutoScroll()
+        }
+    }
+
+    private func extendDragSelection() {
+        guard let drag = dragSelection,
+              let index = imageIndex(at: view.convert(lastPanLocation, to: collectionView)),
+              index != drag.last else { return }
+        applyDragSelection(to: index, previous: drag.last)
+    }
+
+    /// Selection = original state, with the range start…index forced on (or off).
+    private func applyDragSelection(to index: Int, previous: Int) {
+        guard var drag = dragSelection else { return }
+        let range = min(drag.start, index)...max(drag.start, index)
+        let touched = min(drag.start, index, previous)...max(drag.start, index, previous)
+        for item in touched {
+            let url = images[item].url
+            let shouldSelect = range.contains(item) ? drag.selecting : drag.original.contains(url)
+            guard shouldSelect != selectedURLs.contains(url) else { continue }
+            let indexPath = IndexPath(item: item, section: Section.images.rawValue)
+            if shouldSelect {
+                selectedURLs.insert(url)
+                collectionView.selectItem(at: indexPath, animated: false, scrollPosition: [])
+            } else {
+                selectedURLs.remove(url)
+                collectionView.deselectItem(at: indexPath, animated: false)
+            }
+        }
+        drag.last = index
+        dragSelection = drag
+        updateSelectionUI()
+    }
+
+    private func updateAutoScroll() {
+        let safe = view.safeAreaLayoutGuide.layoutFrame
+        let edge: CGFloat = 70
+        if lastPanLocation.y < safe.minY + edge {
+            autoScrollSpeed = -min(24, (safe.minY + edge - lastPanLocation.y) / 2)
+        } else if lastPanLocation.y > safe.maxY - edge {
+            autoScrollSpeed = min(24, (lastPanLocation.y - (safe.maxY - edge)) / 2)
+        } else {
+            autoScrollSpeed = 0
+        }
+        if autoScrollSpeed == 0 {
+            stopAutoScroll()
+        } else if autoScrollLink == nil {
+            let link = CADisplayLink(target: self, selector: #selector(autoScrollTick))
+            link.add(to: .main, forMode: .common)
+            autoScrollLink = link
+        }
+    }
+
+    @objc private func autoScrollTick() {
+        let minY = -collectionView.adjustedContentInset.top
+        let maxY = max(minY, collectionView.contentSize.height - collectionView.bounds.height + collectionView.adjustedContentInset.bottom)
+        collectionView.contentOffset.y = min(max(collectionView.contentOffset.y + autoScrollSpeed, minY), maxY)
+        extendDragSelection()
+    }
+
+    private func stopAutoScroll() {
+        autoScrollLink?.invalidate()
+        autoScrollLink = nil
+        autoScrollSpeed = 0
+    }
+
+    private func selectedURLsInOrder() -> [URL] {
+        images.lazy.map(\.url).filter(selectedURLs.contains)
+    }
+
+    private func updateSelectionUI() {
+        guard isSelecting else { return }
+        let count = selectedURLs.count
+        selectionLabel.text = count == 0 ? "Select Items" : "\(count.formatted()) Selected"
+        selectionLabel.sizeToFit()
+        titleView.subtitleLabel.text = count == 0 ? "Tap or drag to select" : "\(count.formatted()) of \(images.count.formatted()) selected"
+        let hasSelection = count > 0
+        shareSelectionButton.isEnabled = hasSelection
+        favoriteSelectionButton.isEnabled = hasSelection
+        folderSelectionButton.isEnabled = hasSelection
+        compareSelectionButton.isEnabled = count == 2
+        let allFavorite = hasSelection && selectedURLs.allSatisfy(FavoritesStore.shared.contains)
+        favoriteSelectionButton.image = UIImage(systemName: allFavorite ? "heart.fill" : "heart")
+        favoriteSelectionButton.accessibilityLabel = allFavorite ? "Remove from Favorites" : "Add to Favorites"
+        folderSelectionButton.menu = makeFolderMenu()
+        if let item = navigationItem.rightBarButtonItems?.last {
+            item.title = !images.isEmpty && count == images.count ? "Deselect All" : "Select All"
+        }
+    }
+
+    // MARK: Actions
+
+    @objc private func shareSelection() {
+        let urls = selectedURLsInOrder()
+        guard !urls.isEmpty else { return }
+        let activity = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        activity.popoverPresentationController?.barButtonItem = shareSelectionButton
+        present(activity, animated: true)
+    }
+
+    /// Exactly two images: open them in the compare view (A = first in grid order).
+    @objc private func compareSelection() {
+        let urls = selectedURLsInOrder()
+        guard urls.count == 2,
+              let first = images.first(where: { $0.url == urls[0] }),
+              let second = images.first(where: { $0.url == urls[1] }) else { return }
+        present(CompareViewController(first: first, second: second), animated: true)
+    }
+
+    @objc private func toggleFavoriteSelection() {
+        let urls = Array(selectedURLs)
+        guard !urls.isEmpty else { return }
+        let makeFavorite = !urls.allSatisfy(FavoritesStore.shared.contains)
+        FavoritesStore.shared.set(urls, favorite: makeFavorite)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        updateSelectionUI()
+    }
+
+    private func makeFolderMenu() -> UIMenu {
+        var children: [UIMenuElement] = []
+        if folderURL != nil {
+            children.append(UIAction(title: "New Folder with Selection…", image: UIImage(systemName: "folder.badge.plus")) { [weak self] _ in
+                self?.promptNewFolder()
+            })
+        }
+        children.append(UIAction(title: "Copy to…", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
+            self?.exportSelection(move: false)
+        })
+        children.append(UIAction(title: "Move to…", image: UIImage(systemName: "folder")) { [weak self] _ in
+            self?.exportSelection(move: true)
+        })
+        return UIMenu(children: children)
+    }
+
+    private func promptNewFolder() {
+        guard let parent = folderURL else { return }
+        let sources = selectedURLsInOrder()
+        guard !sources.isEmpty else { return }
+        let alert = UIAlertController(title: "New Folder",
+                                      message: "\(sources.count.formatted()) image\(sources.count == 1 ? "" : "s") will go into a new folder inside “\(displayName)”.",
+                                      preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = "New Folder"
+            field.clearButtonMode = .whileEditing
+            field.autocapitalizationType = .words
+        }
+        let name = { (alert.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespaces) }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Copy", style: .default) { [weak self] _ in
+            self?.transfer(sources, intoNewFolder: name(), in: parent, move: false)
+        })
+        alert.addAction(UIAlertAction(title: "Move", style: .default) { [weak self] _ in
+            self?.transfer(sources, intoNewFolder: name(), in: parent, move: true)
+        })
+        present(alert, animated: true)
+    }
+
+    private func transfer(_ sources: [URL], intoNewFolder rawName: String, in parent: URL, move: Bool) {
+        let name = rawName.isEmpty ? "New Folder" : rawName.replacingOccurrences(of: "/", with: "-")
+        let progress = UIAlertController(title: move ? "Moving…" : "Copying…",
+                                         message: "\(sources.count.formatted()) images", preferredStyle: .alert)
+        present(progress, animated: true)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            var failures = 0
+            var moved: [(URL, URL)] = []
+            let folder = Self.uniqueURL(parent.appendingPathComponent(name, isDirectory: true))
+            do {
+                try fileManager.createDirectory(at: folder, withIntermediateDirectories: false)
+                for source in sources {
+                    let destination = Self.uniqueURL(folder.appendingPathComponent(source.lastPathComponent))
+                    do {
+                        if move {
+                            try fileManager.moveItem(at: source, to: destination)
+                            moved.append((source, destination))
+                        } else {
+                            try fileManager.copyItem(at: source, to: destination)
+                        }
+                    } catch {
+                        failures += 1
+                    }
+                }
+            } catch {
+                failures = sources.count
+            }
+            DispatchQueue.main.async { [weak self] in
+                moved.forEach { FavoritesStore.shared.move(from: $0.0, to: $0.1) }
+                progress.dismiss(animated: true) {
+                    self?.finishTransfer(failures: failures, total: sources.count, folderName: folder.lastPathComponent, move: move)
+                }
+            }
+        }
+    }
+
+    private func finishTransfer(failures: Int, total: Int, folderName: String?, move: Bool) {
+        exitSelection()
+        FolderInfoCache.shared.invalidate()
+        reload()
+        guard failures > 0 else { return }
+        let alert = UIAlertController(title: "Some Images Weren't \(move ? "Moved" : "Copied")",
+                                      message: "\(failures) of \(total) could not be \(move ? "moved" : "copied").",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
+    /// Lets the user pick any destination the Files app can reach.
+    private func exportSelection(move: Bool) {
+        let sources = selectedURLsInOrder()
+        guard !sources.isEmpty else { return }
+        pendingExport = (sources, move)
+        let picker = UIDocumentPickerViewController(forExporting: sources, asCopy: !move)
+        picker.delegate = self
+        present(picker, animated: true)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let export = pendingExport else { return }
+        pendingExport = nil
+        if export.isMove {
+            // Keep favourites attached to the moved files (matched by name).
+            let destinations = Dictionary(urls.map { ($0.lastPathComponent, $0) }, uniquingKeysWith: { first, _ in first })
+            for source in export.sources {
+                if let destination = destinations[source.lastPathComponent] {
+                    FavoritesStore.shared.move(from: source, to: destination)
+                }
+            }
+        }
+        finishTransfer(failures: 0, total: export.sources.count, folderName: nil, move: export.isMove)
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        pendingExport = nil
+    }
+
+    private static func uniqueURL(_ url: URL) -> URL {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else { return url }
+        let base = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        let parent = url.deletingLastPathComponent()
+        var counter = 2
+        while true {
+            let name = ext.isEmpty ? "\(base) \(counter)" : "\(base) \(counter).\(ext)"
+            let candidate = parent.appendingPathComponent(name)
+            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
+            counter += 1
+        }
+    }
+}
+
 // MARK: - Data source
 
 extension BrowserViewController: UICollectionViewDataSource {
@@ -622,7 +1088,32 @@ extension BrowserViewController: UICollectionViewDelegate {
         prioritizeVisible()
     }
 
+    func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
+        !isSelecting || indexPath.section == Section.images.rawValue
+    }
+
+    func collectionView(_ collectionView: UICollectionView, shouldBeginMultipleSelectionInteractionAt indexPath: IndexPath) -> Bool {
+        indexPath.section == Section.images.rawValue
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didBeginMultipleSelectionInteractionAt indexPath: IndexPath) {
+        enterSelection()
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didDeselectItemAt indexPath: IndexPath) {
+        guard isSelecting, indexPath.section == Section.images.rawValue, indexPath.item < images.count else { return }
+        selectedURLs.remove(images[indexPath.item].url)
+        updateSelectionUI()
+    }
+
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        if isSelecting {
+            if indexPath.section == Section.images.rawValue, indexPath.item < images.count {
+                selectedURLs.insert(images[indexPath.item].url)
+                updateSelectionUI()
+            }
+            return
+        }
         collectionView.deselectItem(at: indexPath, animated: false)
         switch Section(rawValue: indexPath.section)! {
         case .folders:
@@ -634,7 +1125,7 @@ extension BrowserViewController: UICollectionViewDelegate {
 
     func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
                         point: CGPoint) -> UIContextMenuConfiguration? {
-        guard let indexPath = indexPaths.first else { return nil }
+        guard !isSelecting, let indexPath = indexPaths.first else { return nil }
         let url = indexPath.section == Section.folders.rawValue ? folders[indexPath.item].url : images[indexPath.item].url
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             let share = UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { _ in
@@ -667,10 +1158,25 @@ extension BrowserViewController: UICollectionViewDelegate {
 extension BrowserViewController: UICollectionViewDragDelegate {
     func collectionView(_ collectionView: UICollectionView, itemsForBeginning session: UIDragSession,
                         at indexPath: IndexPath) -> [UIDragItem] {
-        guard indexPath.section == Section.images.rawValue,
-              let provider = NSItemProvider(contentsOf: images[indexPath.item].url) else { return [] }
-        provider.suggestedName = images[indexPath.item].name
-        return [UIDragItem(itemProvider: provider)]
+        guard indexPath.section == Section.images.rawValue else { return [] }
+        let dragged = images[indexPath.item].url
+        // Dragging a selected image carries the whole selection.
+        let urls = isSelecting && selectedURLs.contains(dragged) ? selectedURLsInOrder() : [dragged]
+        return urls.compactMap { url in
+            guard let provider = NSItemProvider(contentsOf: url) else { return nil }
+            provider.suggestedName = url.lastPathComponent
+            return UIDragItem(itemProvider: provider)
+        }
+    }
+}
+
+extension BrowserViewController: UIGestureRecognizerDelegate {
+    /// Swipe selection only starts on a mostly horizontal drag, so vertical drags keep scrolling.
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === selectionPan else { return true }
+        guard isSelecting else { return false }
+        let velocity = selectionPan.velocity(in: collectionView)
+        return abs(velocity.x) > abs(velocity.y)
     }
 }
 
