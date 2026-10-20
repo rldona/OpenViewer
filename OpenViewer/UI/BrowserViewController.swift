@@ -121,6 +121,8 @@ final class BrowserViewController: UIViewController {
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = Theme.background
+        // Inset on every edge: on iPadOS 26 the sidebar floats over the detail column's leading edge.
+        collectionView.contentInsetAdjustmentBehavior = .always
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.prefetchDataSource = self
@@ -178,10 +180,23 @@ final class BrowserViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        updateBreadcrumbs()
         if needsRefilter {
             needsRefilter = false
             applyFilter()
         }
+    }
+
+    /// Every folder above this one in the navigation stack becomes a tappable crumb.
+    private func updateBreadcrumbs() {
+        guard let stack = navigationController?.viewControllers,
+              let index = stack.firstIndex(of: self) else { return }
+        let ancestors = stack[..<index].compactMap { $0 as? BrowserViewController }.map { ancestor in
+            TitleView.Crumb(title: ancestor.displayName) { [weak self] in
+                self?.navigationController?.popToViewController(ancestor, animated: true)
+            }
+        }
+        titleView.setPath(ancestors: ancestors)
     }
 
     @objc private func favoritesChanged(_ notification: Notification) {
@@ -637,9 +652,9 @@ final class BrowserViewController: UIViewController {
         scopeBar.embed(stack, insets: NSDirectionalEdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 18))
         view.addSubview(scopeBar)
         NSLayoutConstraint.activate([
-            scopeBar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            scopeBar.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
             scopeBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
-            scopeBar.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
+            scopeBar.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
             scopeBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 52),
         ])
         // Let the last rows scroll clear of the floating bar.

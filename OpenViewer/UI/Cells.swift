@@ -280,21 +280,33 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     }
 }
 
-/// Two-line navigation title: folder name + live status.
+/// Navigation title: a tappable breadcrumb path to the current folder, plus a live status line.
 final class TitleView: UIView {
+    struct Crumb {
+        let title: String
+        let action: () -> Void
+    }
+
     let titleLabel = UILabel()
     let subtitleLabel = UILabel()
+    private let pathStack = UIStackView()
+
+    /// How many ancestors stay visible; earlier ones fold into a "…" menu.
+    private let visibleAncestors = 2
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         titleLabel.font = .preferredFont(forTextStyle: .headline)
-        titleLabel.textAlignment = .center
-        subtitleLabel.font = .preferredFont(forTextStyle: .caption1)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         subtitleLabel.textColor = .secondaryLabel
         subtitleLabel.textAlignment = .center
         subtitleLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        let stack = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
+        pathStack.alignment = .center
+        pathStack.spacing = 4
+        let stack = UIStackView(arrangedSubviews: [pathStack, subtitleLabel])
         stack.axis = .vertical
+        stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -303,7 +315,56 @@ final class TitleView: UIView {
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+        setPath(ancestors: [])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func setPath(ancestors: [Crumb]) {
+        pathStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let hidden = ancestors.dropLast(visibleAncestors)
+        let shown = ancestors.suffix(visibleAncestors)
+        if !hidden.isEmpty {
+            let more = crumbButton(title: "…")
+            more.menu = UIMenu(children: hidden.reversed().map { crumb in
+                UIAction(title: crumb.title, image: UIImage(systemName: "folder")) { _ in crumb.action() }
+            })
+            more.showsMenuAsPrimaryAction = true
+            more.accessibilityLabel = "Earlier folders"
+            pathStack.addArrangedSubview(more)
+            pathStack.addArrangedSubview(chevron())
+        }
+        for crumb in shown {
+            let button = crumbButton(title: crumb.title)
+            button.addAction(UIAction { _ in crumb.action() }, for: .primaryActionTriggered)
+            pathStack.addArrangedSubview(button)
+            pathStack.addArrangedSubview(chevron())
+        }
+        pathStack.addArrangedSubview(titleLabel)
+    }
+
+    private func crumbButton(title: String) -> UIButton {
+        var config = UIButton.Configuration.plain()
+        config.title = title
+        config.baseForegroundColor = .secondaryLabel
+        config.contentInsets = NSDirectionalEdgeInsets(top: 2, leading: 2, bottom: 2, trailing: 2)
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = .preferredFont(forTextStyle: .subheadline)
+            return attributes
+        }
+        config.titleLineBreakMode = .byTruncatingTail
+        let button = UIButton(configuration: config)
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        button.widthAnchor.constraint(lessThanOrEqualToConstant: 180).isActive = true
+        return button
+    }
+
+    private func chevron() -> UIImageView {
+        let view = UIImageView(image: UIImage(systemName: "chevron.right",
+                                              withConfiguration: UIImage.SymbolConfiguration(pointSize: 10, weight: .semibold)))
+        view.tintColor = .tertiaryLabel
+        view.setContentHuggingPriority(.required, for: .horizontal)
+        return view
+    }
 }

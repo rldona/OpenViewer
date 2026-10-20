@@ -19,7 +19,8 @@ behind the design.
 
 ## Features
 
-- **Open any folder** with the system picker. Recent folders are remembered, and the last one reopens on launch.
+- **Open any folder** with the system picker. A sidebar keeps favorites, pinned folders and recent locations one tap away, and the last folder reopens on launch. A breadcrumb path in the title jumps back up any number of levels.
+- **Dark gallery look** with floating glass controls (Liquid Glass on iPadOS 26), or match the system appearance.
 - **Folder browsing** with cover thumbnails and item counts, an option to hide folders that contain no images anywhere inside, or **Include Subfolders** to flatten the whole tree into one grid. The tree is scanned in the background and results stream in as they are found.
 - **Justified grid** like Google Photos, where every image keeps its proportions, or a square grid. Pinch or press ⌘+ / ⌘− to resize, sort by natural name, date or size, and filter by name.
 - **Full-screen viewer**: swipe between images, double-tap or pinch to zoom, zoom transition from the grid, and swipe down to close.
