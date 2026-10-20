@@ -83,4 +83,7 @@ struct ImageCollection {
     var groupTitles: [Int: String] = [:]
     /// For live collections (e.g. a tag): re-read on every reload instead of using `images`.
     var source: (() -> [URL])?
+    /// Sets of duplicates: the first image of each group is the one to keep, groups left with a
+    /// single image drop out, and "Select Copies" picks everything else.
+    var isDuplicates = false
 }

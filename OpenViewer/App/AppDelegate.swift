@@ -72,9 +72,26 @@ final class RootNavigationController: UINavigationController {
     override var childForStatusBarHidden: UIViewController? { nil }
 }
 
-final class RootSplitViewController: UISplitViewController {
+final class RootSplitViewController: UISplitViewController, UISplitViewControllerDelegate {
+    /// Posted after the sidebar is shown or hidden (it floats over the content, which isn't resized).
+    static let sidebarDidChange = Notification.Name("OpenViewer.sidebarDidChange")
+
     override var prefersStatusBarHidden: Bool { true }
     override var childForStatusBarHidden: UIViewController? { nil }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        delegate = self
+    }
+
+    func splitViewController(_ svc: UISplitViewController, willChangeTo displayMode: UISplitViewController.DisplayMode) {
+        let post = { NotificationCenter.default.post(name: Self.sidebarDidChange, object: svc) }
+        if let coordinator = svc.transitionCoordinator {
+            coordinator.animate(alongsideTransition: nil) { _ in post() }
+        } else {
+            DispatchQueue.main.async(execute: post)
+        }
+    }
 }
 
 /// Opens a folder in a new window (Stage Manager, Split View).

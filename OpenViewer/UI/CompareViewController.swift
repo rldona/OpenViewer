@@ -102,14 +102,34 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         becomeFirstResponder()
     }
 
+    private var lastPaneSize: CGSize = .zero
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        guard view.bounds.size != lastBoundsSize else { return }
-        lastBoundsSize = view.bounds.size
-        splitStack.axis = view.bounds.width >= view.bounds.height ? .horizontal : .vertical
-        view.layoutIfNeeded()
-        layoutShared()
-        layoutSplit()
+        if view.bounds.size != lastBoundsSize {
+            lastBoundsSize = view.bounds.size
+            splitStack.axis = view.bounds.width >= view.bounds.height ? .horizontal : .vertical
+            // The stack lays out its panes in its own pass: settle it before measuring them.
+            splitStack.setNeedsLayout()
+            splitStack.layoutIfNeeded()
+            layoutShared()
+        }
+        // Rotating changes the panes' size after the view's; relayout whenever they really change.
+        if leftScroll.bounds.size != lastPaneSize {
+            lastPaneSize = leftScroll.bounds.size
+            layoutSplit()
+        }
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.lastBoundsSize = .zero
+            self.lastPaneSize = .zero
+            self.view.setNeedsLayout()
+            self.view.layoutIfNeeded()
+        }
     }
 
     // MARK: Setup
@@ -142,6 +162,9 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
 
         divider.translatesAutoresizingMaskIntoConstraints = true
         divider.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handleDividerPan(_:))))
+        let centerTap = UITapGestureRecognizer(target: self, action: #selector(centerDivider))
+        centerTap.numberOfTapsRequired = 2
+        divider.addGestureRecognizer(centerTap)
         view.addSubview(divider)
     }
 
@@ -306,6 +329,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         container.frame = CGRect(origin: .zero, size: size)
         sharedScroll.contentSize = size
         center(sharedScroll)
+        resetOffset(sharedScroll)
         layoutDivider()
         updateSwipeMask()
     }
@@ -317,6 +341,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
             imageView.frame = CGRect(origin: .zero, size: size)
             scroll.contentSize = size
             center(scroll)
+            resetOffset(scroll)
         }
     }
 
@@ -326,6 +351,11 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         let insetX = max(0, (bounds.width - content.width) / 2)
         let insetY = max(0, (bounds.height - content.height) / 2)
         scroll.contentInset = UIEdgeInsets(top: insetY, left: insetX, bottom: insetY, right: insetX)
+    }
+
+    /// After a relayout at zoom 1 the old scroll position no longer fits: start from the centred image.
+    private func resetOffset(_ scroll: UIScrollView) {
+        scroll.contentOffset = CGPoint(x: -scroll.contentInset.left, y: -scroll.contentInset.top)
     }
 
     private func layoutDivider() {
@@ -477,6 +507,15 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         dividerFraction = min(max(x / max(view.bounds.width, 1), 0), 1)
         layoutDivider()
         updateSwipeMask()
+    }
+
+    /// Double-tapping the divider puts it back in the middle.
+    @objc private func centerDivider() {
+        dividerFraction = 0.5
+        UIView.animate(withDuration: 0.25) {
+            self.layoutDivider()
+            self.updateSwipeMask()
+        }
     }
 
     @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {

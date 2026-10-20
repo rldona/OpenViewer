@@ -64,6 +64,8 @@ final class BrowserViewController: UIViewController {
     private var prefetchTokens: [IndexPath: LoadToken] = [:]
     private var menuButton: UIBarButtonItem!
     private var normalRightItems: [UIBarButtonItem] = []
+    /// Buttons specific to this kind of view (e.g. "Select Copies" for duplicates), shown first.
+    private var extraRightItems: [UIBarButtonItem] = []
     private var slideshowButton: UIBarButtonItem!
     /// Floating glass bar: scope (folders / whole tree / favourites) and thumbnail size.
     private let scopeBar = GlassView()
@@ -204,6 +206,11 @@ final class BrowserViewController: UIViewController {
         collectionView.addGestureRecognizer(selectionPan)
         setupSelectionToolbar()
         setupScopeBar()
+        if collection?.isDuplicates == true {
+            extraRightItems = [UIBarButtonItem(title: "Select Copies", primaryAction: UIAction { [weak self] _ in self?.selectCopies() })]
+            normalRightItems = extraRightItems + normalRightItems
+            navigationItem.rightBarButtonItems = normalRightItems
+        }
         if presentingViewController != nil, navigationController?.viewControllers.first === self {
             // Shown on its own (duplicates, similar images): needs a way out.
             navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
@@ -318,6 +325,7 @@ final class BrowserViewController: UIViewController {
                         return ImageItem(url: url, size: values.fileSize ?? 0, modified: values.contentModificationDate ?? .distantPast)
                     }.sorted(by: order, byPath: true)
                 } ?? collection.images.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+                    .droppingLoneDuplicates(in: collection)
                 DispatchQueue.main.async {
                     guard let self, !flag.cancelled else { return }
                     self.isScanning = false
@@ -528,7 +536,8 @@ final class BrowserViewController: UIViewController {
             groups.append(GalleryLayout.Group(
                 start: index,
                 title: id.flatMap { collection.groupTitles[$0] } ?? "Other",
-                subtitle: "\(count.formatted()) image\(count == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"))
+                subtitle: "\(count.formatted()) image\(count == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"
+                    + (collection.isDuplicates ? " · the first one is the original" : "")))
             index = end
         }
         return groups
@@ -742,6 +751,8 @@ final class BrowserViewController: UIViewController {
                 emptyLabel.text = "No matches for “\(query)”"
             } else if showsOnlyFavorites {
                 emptyLabel.text = "No favorites yet\nTap ♥︎ in the viewer, press F, or long-press a thumbnail."
+            } else if collection?.isDuplicates == true {
+                emptyLabel.text = "No duplicates left\nEvery set is down to its original."
             } else {
                 emptyLabel.text = "No images here"
             }
@@ -955,6 +966,13 @@ final class BrowserViewController: UIViewController {
             self?.toggleTextSearch()
         }
         var folderActions: [UIMenuElement] = []
+        if let folderURL, !imageContext {
+            // Only folders here: duplicates can still be searched for across everything inside.
+            folderActions.append(UIAction(title: "Find Duplicates in Subfolders", subtitle: "Every image inside “\(displayName)”",
+                                          image: UIImage(systemName: "square.on.square.badge.person.crop")) { [weak self] _ in
+                self?.findDuplicatesInTree(folderURL)
+            })
+        }
         if folderURL != nil {
             folderActions.append(UIAction(title: "Save as Smart Album…", subtitle: "Keeps these filters in the sidebar",
                                           image: UIImage(systemName: "gearshape.2")) { [weak self] _ in
@@ -995,22 +1013,24 @@ final class BrowserViewController: UIViewController {
             // The header sits on the first group; nested groups would push it down.
             sections.append(UIMenu(title: "Images", options: .displayInline, children: styleActions))
             sections.append(UIMenu(options: .displayInline, children: [larger, smaller]))
+            // Filters and image analysis live together in one submenu to keep the menu short.
+            let active = [colorFilter?.title, tagFilter.map { "\($0.title) tag" }, searchesText ? "Text" : nil].compactMap { $0 }
             sections.append(UIMenu(options: .displayInline, children: [
                 UIMenu(title: "Image Size", subtitle: minimumSide == 0 ? "All" : "≥ \(minimumSide) px",
                        image: UIImage(systemName: "line.3.horizontal.decrease.circle"), children: sizeActions),
                 UIMenu(title: "Transparency", subtitle: current.title,
                        image: UIImage(systemName: "checkerboard.rectangle"), children: backgroundActions),
-                UIMenu(title: "Color", subtitle: colorFilter?.title ?? "Any",
-                       image: UIImage(systemName: "paintpalette"), children: colorActions),
-                UIMenu(title: "Tag", subtitle: tagFilter?.title ?? "Any",
-                       image: UIImage(systemName: "tag"), children: tagActions),
-                textSearch,
-            ]))
-        }
-        if imageContext {
-            sections.append(UIMenu(options: .displayInline, children: [
-                UIAction(title: "Find Duplicates", subtitle: "Identical or near-identical images",
-                         image: UIImage(systemName: "square.on.square.badge.person.crop")) { [weak self] _ in self?.findDuplicates() },
+                UIMenu(title: "Find & Filter", subtitle: active.isEmpty ? "Color, tags, text, duplicates" : active.joined(separator: " · "),
+                       image: UIImage(systemName: "sparkle.magnifyingglass"), children: [
+                    UIMenu(options: .displayInline, children: [
+                        UIMenu(title: "Color", subtitle: colorFilter?.title ?? "Any",
+                               image: UIImage(systemName: "paintpalette"), children: colorActions),
+                        UIMenu(title: "Tag", subtitle: tagFilter?.title ?? "Any",
+                               image: UIImage(systemName: "tag"), children: tagActions),
+                        textSearch,
+                    ]),
+                    duplicatesMenu(),
+                ]),
             ]))
         }
         sections.append(UIMenu(title: folderURL == nil ? "" : "This Folder", options: .displayInline,
@@ -1027,7 +1047,7 @@ final class BrowserViewController: UIViewController {
     private func updateContextualControls() {
         let imageContext = showsImageControls
         updateScopeBar(imageContext: imageContext)
-        let items: [UIBarButtonItem] = imageContext ? [menuButton, slideshowButton, selectButton] : [menuButton]
+        let items: [UIBarButtonItem] = extraRightItems + (imageContext ? [menuButton, slideshowButton, selectButton] : [menuButton])
         if items.map(ObjectIdentifier.init) != normalRightItems.map(ObjectIdentifier.init) {
             normalRightItems = items
             if !isSelecting { navigationItem.setRightBarButtonItems(items, animated: false) }
@@ -1048,8 +1068,55 @@ final class BrowserViewController: UIViewController {
 
     // MARK: Analysis
 
-    private func findDuplicates() {
-        let items = images
+    /// Where to look, spelled out: the images shown here, or this folder with all its subfolders.
+    private func duplicatesMenu() -> UIMenuElement {
+        let here = UIAction(title: includeSubfolders || isListView ? "Among These Images" : "In This Folder Only",
+                            subtitle: "The \(images.count.formatted()) images shown here",
+                            image: UIImage(systemName: "square.on.square")) { [weak self] _ in self?.findDuplicates() }
+        guard let folderURL, !includeSubfolders else {
+            return UIMenu(title: "Find Duplicates", image: UIImage(systemName: "square.on.square.badge.person.crop"), children: [here])
+        }
+        let tree = UIAction(title: "In This Folder and Subfolders", subtitle: "Every image inside “\(displayName)”",
+                            image: UIImage(systemName: "folder.badge.gearshape")) { [weak self] _ in
+            self?.findDuplicatesInTree(folderURL)
+        }
+        return UIMenu(title: "Find Duplicates", image: UIImage(systemName: "square.on.square.badge.person.crop"), children: [here, tree])
+    }
+
+    func findDuplicatesInTree(_ root: URL) {
+        let alert = UIAlertController(title: "Finding Duplicates", message: "Listing images…", preferredStyle: .alert)
+        var cancelled = false
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in cancelled = true })
+        present(alert, animated: true)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var items: [ImageItem] = []
+            FolderScanner.scanRecursively(root, isCancelled: { cancelled }) { items += $0 }
+            DispatchQueue.main.async {
+                guard let self, !cancelled else { return }
+                alert.dismiss(animated: true) { self.findDuplicates(in: items) }
+            }
+        }
+    }
+
+    /// Selects every image except the first (the original) of each duplicate set, ready to delete.
+    private func selectCopies() {
+        guard let collection, collection.isDuplicates else { return }
+        enterSelection()
+        var seen = Set<Int>()
+        var copies = Set<URL>()
+        for item in images {
+            guard let group = collection.groupOf[item.url] else { continue }
+            if !seen.insert(group).inserted { copies.insert(item.url) }
+        }
+        for indexPath in collectionView.indexPathsForSelectedItems ?? [] { collectionView.deselectItem(at: indexPath, animated: false) }
+        selectedURLs = copies
+        restoreSelection()
+        updateSelectionUI()
+    }
+
+    private func findDuplicates() { findDuplicates(in: images) }
+
+    private func findDuplicates(in items: [ImageItem]) {
         guard items.count > 1 else { return }
         runAnalysis(.visual, on: items, title: "Finding Duplicates") { [weak self] in
             let signatures = AnalysisFlows.signatures(of: items)
@@ -1223,7 +1290,10 @@ extension BrowserViewController {
         let animate = UIAction(title: "Play as Animation", image: UIImage(systemName: "film.stack")) { [weak self] _ in
             self?.playFolderAsAnimation(url)
         }
-        var extras: [UIMenuElement] = [animate]
+        let duplicates = UIAction(title: "Find Duplicates Inside", image: UIImage(systemName: "square.on.square.badge.person.crop")) { [weak self] _ in
+            self?.findDuplicatesInTree(url)
+        }
+        var extras: [UIMenuElement] = [animate, duplicates]
         if UIApplication.shared.supportsMultipleScenes {
             extras.insert(UIAction(title: "Open in New Window", image: UIImage(systemName: "macwindow.badge.plus")) { _ in
                 WindowOpener.open(url)
@@ -1630,9 +1700,14 @@ extension BrowserViewController: UIDocumentPickerDelegate {
         guard isSelecting, !urls.isEmpty else { return }
         let count = urls.count
         let noun = count == 1 ? "Image" : "\(count.formatted()) Images"
+        let keepsOriginals = collection?.isDuplicates == true && !urls.contains { url in
+            // Every set still keeps at least one image: its first one isn't selected.
+            images.first { collection?.groupOf[$0.url] == collection?.groupOf[url] }?.url == url
+        }
         let alert = UIAlertController(
             title: "Delete \(noun)?",
-            message: "They will be moved to Recently Deleted in the Files app when the location supports it. "
+            message: (keepsOriginals ? "The original of each set stays. " : "")
+                + "They will be moved to Recently Deleted in the Files app when the location supports it. "
                 + "Otherwise they are deleted permanently and can't be recovered.",
             preferredStyle: .actionSheet)
         alert.addAction(UIAlertAction(title: "Delete \(noun)", style: .destructive) { [weak self] _ in
@@ -1886,5 +1961,15 @@ extension BrowserViewController: UISearchResultsUpdating {
         guard text != query else { return }
         query = text
         applyFilter()
+    }
+}
+
+private extension Array where Element == ImageItem {
+    /// In a duplicates collection, a set reduced to one image is no longer a duplicate.
+    func droppingLoneDuplicates(in collection: ImageCollection) -> [ImageItem] {
+        guard collection.isDuplicates else { return self }
+        var counts: [Int: Int] = [:]
+        for item in self { if let group = collection.groupOf[item.url] { counts[group, default: 0] += 1 } }
+        return filter { item in collection.groupOf[item.url].map { (counts[$0] ?? 0) > 1 } ?? false }
     }
 }

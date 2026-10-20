@@ -65,7 +65,7 @@ final class FastScroller: UIView {
         return thumb.frame.insetBy(dx: -18, dy: -14).contains(point)
     }
 
-    private var isUseful: Bool {
+    var isUseful: Bool {
         guard let scrollView else { return false }
         return scrollView.contentSize.height > scrollView.bounds.height * minimumScreens
     }
@@ -82,6 +82,8 @@ final class FastScroller: UIView {
 
     /// Called from the grid's scrollViewDidScroll.
     func scrollViewDidScroll() {
+        // One indicator at a time: the system's thin bar only when this handle isn't offered.
+        scrollView?.showsVerticalScrollIndicator = !isUseful
         guard isUseful else { setVisible(false); return }
         if !isDragging { positionThumb() }
         show()

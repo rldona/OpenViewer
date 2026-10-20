@@ -68,17 +68,24 @@ enum AnalysisFlows {
         var groupOf: [URL: Int] = [:]
         var titles: [Int: String] = [:]
         for (id, group) in groups.enumerated() {
-            // Biggest file first: usually the one worth keeping.
-            let members = group.map { items[$0] }.sorted { $0.size > $1.size }
+            // The one worth keeping first: most pixels, then biggest file, then the oldest.
+            let members = group.map { items[$0] }.map { item -> (ImageItem, CGFloat) in
+                let size = ImagePipeline.pixelSize(of: item.url) ?? .zero
+                return (item, size.width * size.height)
+            }.sorted { a, b in
+                if a.1 != b.1 { return a.1 > b.1 }
+                if a.0.size != b.0.size { return a.0.size > b.0.size }
+                return a.0.modified < b.0.modified
+            }.map(\.0)
             for item in members { groupOf[item.url] = id }
             images += members
-            titles[id] = members[0].name
+            titles[id] = "Keep “\(members[0].name)”"
         }
         let wasted = groups.reduce(0) { total, group in
             total + group.map { items[$0].size }.sorted(by: >).dropFirst().reduce(0, +)
         }
         let title = "Duplicates · \(ByteCountFormatter.string(fromByteCount: Int64(wasted), countStyle: .file)) in copies"
-        return ImageCollection(title: title, images: images, groupOf: groupOf, groupTitles: titles)
+        return ImageCollection(title: title, images: images, groupOf: groupOf, groupTitles: titles, isDuplicates: true)
     }
 
     /// `item` followed by the images that look most like it.

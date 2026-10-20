@@ -43,7 +43,7 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapCanvas))
         canvas.addGestureRecognizer(tap)
 
-        emptyLabel.text = "Empty board\nSelect images in a folder and choose “Add to Board”, or tap +."
+        emptyLabel.text = "Empty board\nSelect images in a folder and choose “Add to Board”,\nor use “Add Images from Files…” in the ⋯ menu."
         emptyLabel.numberOfLines = 0
         emptyLabel.textAlignment = .center
         emptyLabel.textColor = .secondaryLabel
@@ -56,16 +56,24 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
             emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -64),
         ])
 
-        let add = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in self?.pickImages() })
-        add.accessibilityLabel = "Add Images"
-        let fit = UIBarButtonItem(image: UIImage(systemName: "arrow.down.right.and.arrow.up.left"),
-                                  primaryAction: UIAction { [weak self] _ in self?.fitAll(animated: true) })
-        fit.accessibilityLabel = "Fit All"
+        // Labelled actions: what each does is clear without guessing from an icon.
         let more = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: UIMenu(children: [
-            UIAction(title: "Export as Image", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in self?.export() },
-            UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename() },
+            UIAction(title: "Add Images from Files…", subtitle: "Pick images to place on this board",
+                     image: UIImage(systemName: "photo.badge.plus")) { [weak self] _ in self?.pickImages() },
+            UIAction(title: "Show Everything", subtitle: "Zoom to fit all images on screen",
+                     image: UIImage(systemName: "rectangle.arrowtriangle.2.inward")) { [weak self] _ in self?.fitAll(animated: true) },
+            UIMenu(options: .displayInline, children: [
+                UIAction(title: "Export as Image", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in self?.export() },
+                UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename() },
+            ]),
         ]))
-        navigationItem.rightBarButtonItems = [more, fit, add]
+        more.accessibilityLabel = "Board Options"
+        navigationItem.rightBarButtonItems = [more]
+        NotificationCenter.default.addObserver(forName: RootSplitViewController.sidebarDidChange, object: nil, queue: .main) { [weak self] _ in
+            self?.refitIfNeeded()
+            // Once more after the sidebar has settled in its final place.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.refitIfNeeded() }
+        }
         if presentingViewController != nil, navigationController?.viewControllers.first === self {
             navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
                 self?.dismiss(animated: true)
@@ -77,14 +85,42 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
         buildItems()
     }
 
-    private var didFit = false
+    /// True while the view still shows "everything fitted": it then follows sidebar and rotation
+    /// changes. Panning or zooming by hand turns it off until "Show Everything" is used again.
+    private var isFitted = true
+    private var lastVisibleArea: CGRect = .zero
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if !didFit, scrollView.bounds.width > 0 {
-            didFit = true
-            fitAll(animated: false)
+        refitIfNeeded(animated: lastVisibleArea != .zero)
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        refitIfNeeded()
+    }
+
+    private func refitIfNeeded(animated: Bool = true) {
+        let area = visibleArea
+        guard area.width > 0, area != lastVisibleArea else { return }
+        lastVisibleArea = area
+        if isFitted { fitAll(animated: animated) }
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { isFitted = false }
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { isFitted = false }
+
+    /// The part of the screen not covered by bars or the floating sidebar, in this view's coordinates.
+    private var visibleArea: CGRect {
+        var area = view.bounds.inset(by: view.safeAreaInsets)
+        if let split = splitViewController, !split.isCollapsed, split.displayMode != .secondaryOnly,
+           let sidebar = split.viewController(for: .primary)?.view, sidebar.window != nil {
+            let frame = sidebar.convert(sidebar.bounds, to: view)
+            if frame.intersects(view.bounds), frame.maxX > area.minX, frame.minX <= view.bounds.minX + 1 {
+                area = CGRect(x: frame.maxX, y: area.minY, width: max(area.maxX - frame.maxX, 0), height: area.height)
+            }
         }
+        return area
     }
 
     // MARK: Items
@@ -179,8 +215,18 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
             return ImageItem(url: url, size: values.fileSize ?? 0, modified: values.contentModificationDate ?? .distantPast)
         }
         let index = items.firstIndex { $0.url == view.url } ?? 0
-        let viewer = ViewerViewController(items: items, index: index)
+        let viewer = ViewerViewController(items: items, index: index, showsControls: true)
         viewer.modalPresentationStyle = .fullScreen
+        // Same zoom transition as the grid: grows out of the image and closes with a swipe down,
+        // back into whichever board image is showing.
+        let options = UIViewController.Transition.ZoomOptions()
+        options.interactiveDismissShouldBegin = { [weak viewer] _ in viewer?.canInteractivelyDismiss ?? true }
+        viewer.preferredTransition = .zoom(options: options) { [weak self] context in
+            guard let self, let viewer = context.zoomedViewController as? ViewerViewController,
+                  items.indices.contains(viewer.currentIndex) else { return nil }
+            let url = items[viewer.currentIndex].url
+            return self.itemViews.values.first { $0.url == url }
+        }
         present(viewer, animated: true)
     }
 
@@ -217,15 +263,19 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
             return
         }
         // Fit into the part of the screen not covered by the floating sidebar and bars.
-        let visible = scrollView.bounds.inset(by: view.safeAreaInsets).insetBy(dx: 40, dy: 40)
+        let visible = visibleArea.insetBy(dx: 40, dy: 40)
         guard visible.width > 0, visible.height > 0 else { return }
         let scale = min(max(min(visible.width / bounds.width, visible.height / bounds.height), scrollView.minimumZoomScale), 1.5)
+        // Where the content's centre must land, relative to the scroll view's frame (not its bounds,
+        // whose origin moves with the zoom).
+        let target = view.convert(CGPoint(x: visible.midX, y: visible.midY), to: scrollView.superview)
+        let anchor = CGPoint(x: target.x - scrollView.frame.minX, y: target.y - scrollView.frame.minY)
         let apply = {
             self.scrollView.zoomScale = scale
-            self.scrollView.contentOffset = CGPoint(x: bounds.midX * scale - (visible.midX - self.scrollView.bounds.minX),
-                                                    y: bounds.midY * scale - (visible.midY - self.scrollView.bounds.minY))
+            self.scrollView.contentOffset = CGPoint(x: bounds.midX * scale - anchor.x, y: bounds.midY * scale - anchor.y)
         }
         animated ? UIView.animate(withDuration: 0.35, animations: apply) : apply()
+        isFitted = true
     }
 
     // MARK: Adding
@@ -333,16 +383,13 @@ final class BoardItemView: UIView, UIGestureRecognizerDelegate, UIContextMenuInt
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         let rotate = UIRotationGestureRecognizer(target: self, action: #selector(handleRotate(_:)))
+        // One tap opens the image, like in the grid; dragging, pinching or twisting arranges it.
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
-        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
-        doubleTap.numberOfTapsRequired = 2
-        tap.require(toFail: doubleTap)
         for recognizer in [pan, pinch, rotate] as [UIGestureRecognizer] {
             recognizer.delegate = self
             addGestureRecognizer(recognizer)
         }
         addGestureRecognizer(tap)
-        addGestureRecognizer(doubleTap)
         addInteraction(UIContextMenuInteraction(delegate: self))
         applyGeometry()
         load()
@@ -420,8 +467,10 @@ final class BoardItemView: UIView, UIGestureRecognizerDelegate, UIContextMenuInt
         if rotation.state == .ended || rotation.state == .cancelled { onChange?(item) }
     }
 
-    @objc private func handleTap() { onSelect?(self) }
-    @objc private func handleDoubleTap() { onOpen?(self) }
+    @objc private func handleTap() {
+        onSelect?(self)
+        onOpen?(self)
+    }
 
     func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
                                 configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {

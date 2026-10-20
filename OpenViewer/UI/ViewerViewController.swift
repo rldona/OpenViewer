@@ -35,12 +35,15 @@ final class ViewerViewController: UIViewController {
     private var chromeHidden = true
     private var slideshowTimer: Timer?
     private var startSlideshowOnAppear: Bool
+    private let showsControlsOnOpen: Bool
     private var preloadTokens: [LoadToken] = []
 
-    init(items: [ImageItem], index: Int, startSlideshow: Bool = false) {
+    /// `showsControls`: open with the controls on screen (e.g. from a board) instead of the bare image.
+    init(items: [ImageItem], index: Int, startSlideshow: Bool = false, showsControls: Bool = false) {
         self.items = items
         self.currentIndex = min(max(index, 0), max(items.count - 1, 0))
         self.startSlideshowOnAppear = startSlideshow
+        self.showsControlsOnOpen = showsControls
         super.init(nibName: nil, bundle: nil)
         overrideUserInterfaceStyle = .dark
     }
@@ -74,6 +77,7 @@ final class ViewerViewController: UIViewController {
         topBar.alpha = 0
         bottomBar.alpha = 0
         infoPanel.alpha = 0
+        if showsControlsOnOpen { setChromeHidden(false) }
         if !items.isEmpty {
             pageController.setViewControllers([makePage(currentIndex)], direction: .forward, animated: false)
         }
