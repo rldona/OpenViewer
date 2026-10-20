@@ -83,7 +83,7 @@ final class GalleryLayout: UICollectionViewLayout {
         var ratioSum: CGFloat = 0
 
         func ratio(_ index: Int) -> CGFloat {
-            index < ratios.count ? ratios[index] : AspectRatioStore.placeholder
+            index < ratios.count ? ratios[index] : ImageMetricsStore.placeholderRatio
         }
 
         func placeRow(_ range: Range<Int>, height: CGFloat, fill: Bool) {

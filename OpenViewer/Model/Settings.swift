@@ -27,6 +27,20 @@ enum Settings {
         set { defaults.set(newValue.rawValue, forKey: "gridStyle") }
     }
 
+    /// Images whose longest side is below this many pixels are hidden (0 = show all).
+    static var minimumImageSide: Int {
+        get { defaults.integer(forKey: "minimumImageSide") }
+        set { defaults.set(newValue, forKey: "minimumImageSide") }
+    }
+
+    static var transparencyBackground: TransparencyBackground {
+        get { TransparencyBackground(rawValue: defaults.string(forKey: "transparencyBackground") ?? "") ?? .checkerboard }
+        set {
+            defaults.set(newValue.rawValue, forKey: "transparencyBackground")
+            NotificationCenter.default.post(name: TransparencyBackground.didChange, object: nil)
+        }
+    }
+
     static var includeSubfolders: Bool {
         get { defaults.bool(forKey: "includeSubfolders") }
         set { defaults.set(newValue, forKey: "includeSubfolders") }

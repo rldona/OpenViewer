@@ -17,6 +17,9 @@ final class ViewerViewController: UIViewController {
     private let playButton = UIButton(type: .system)
     private let infoButton = UIButton(type: .system)
     private let shareButton = UIButton(type: .system)
+    private let favoriteButton = UIButton(type: .system)
+    private let favoriteHUD = UIImageView()
+    private let toastLabel = PaddedLabel()
 
     // Controls start hidden so the image gets the whole screen; a tap reveals them.
     private var chromeHidden = true
@@ -100,6 +103,7 @@ final class ViewerViewController: UIViewController {
         configure(playButton, symbol: "play.fill", label: "Slideshow", action: #selector(toggleSlideshow))
         configure(infoButton, symbol: "info.circle", label: "Info", action: #selector(showInfo))
         configure(shareButton, symbol: "square.and.arrow.up", label: "Share", action: #selector(share))
+        configure(favoriteButton, symbol: "heart", label: "Favorite", action: #selector(toggleFavorite))
         playButton.menu = slideshowMenu()
 
         titleLabel.font = .preferredFont(forTextStyle: .headline)
@@ -111,7 +115,7 @@ final class ViewerViewController: UIViewController {
         let titles = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
         titles.axis = .vertical
 
-        let topStack = UIStackView(arrangedSubviews: [closeButton, titles, playButton, infoButton, shareButton])
+        let topStack = UIStackView(arrangedSubviews: [closeButton, titles, favoriteButton, playButton, infoButton, shareButton])
         topStack.alignment = .center
         topStack.spacing = 8
         topStack.translatesAutoresizingMaskIntoConstraints = false
@@ -132,6 +136,35 @@ final class ViewerViewController: UIViewController {
         bottomStack.translatesAutoresizingMaskIntoConstraints = false
         bottomBar.contentView.addSubview(bottomStack)
         bottomBar.isHidden = items.count < 2
+
+        favoriteHUD.image = UIImage(systemName: "heart.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 72, weight: .medium))
+        favoriteHUD.tintColor = .white
+        favoriteHUD.alpha = 0
+        favoriteHUD.layer.shadowColor = UIColor.black.cgColor
+        favoriteHUD.layer.shadowOpacity = 0.4
+        favoriteHUD.layer.shadowRadius = 12
+        favoriteHUD.layer.shadowOffset = .zero
+        favoriteHUD.isUserInteractionEnabled = false
+        favoriteHUD.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(favoriteHUD)
+        NSLayoutConstraint.activate([
+            favoriteHUD.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            favoriteHUD.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+
+        toastLabel.font = .preferredFont(forTextStyle: .headline)
+        toastLabel.textColor = .white
+        toastLabel.backgroundColor = UIColor(white: 0, alpha: 0.6)
+        toastLabel.layer.cornerRadius = 12
+        toastLabel.layer.cornerCurve = .continuous
+        toastLabel.clipsToBounds = true
+        toastLabel.alpha = 0
+        toastLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(toastLabel)
+        NSLayoutConstraint.activate([
+            toastLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            toastLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -96),
+        ])
 
         for bar in [topBar, bottomBar] {
             bar.translatesAutoresizingMaskIntoConstraints = false
@@ -209,6 +242,7 @@ final class ViewerViewController: UIViewController {
         subtitleLabel.text = item.url.deletingLastPathComponent().lastPathComponent
         counterLabel.text = "\((currentIndex + 1).formatted()) / \(items.count.formatted())"
         if !scrubber.isTracking { scrubber.value = Float(currentIndex) }
+        updateFavoriteButton()
         preloadNeighbours()
     }
 
@@ -268,6 +302,57 @@ final class ViewerViewController: UIViewController {
 
     // MARK: Actions
 
+    // MARK: Favorites
+
+    private func updateFavoriteButton() {
+        guard !items.isEmpty else { return }
+        let isFavorite = FavoritesStore.shared.contains(items[currentIndex].url)
+        favoriteButton.setImage(UIImage(systemName: isFavorite ? "heart.fill" : "heart",
+                                         withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)), for: .normal)
+        favoriteButton.tintColor = isFavorite ? .systemPink : .white
+        favoriteButton.accessibilityLabel = isFavorite ? "Remove from Favorites" : "Add to Favorites"
+    }
+
+    @objc private func toggleFavorite() {
+        guard !items.isEmpty else { return }
+        let isFavorite = FavoritesStore.shared.toggle(items[currentIndex].url)
+        updateFavoriteButton()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        showFavoriteHUD(isFavorite)
+    }
+
+    /// Brief centred heart so the change is visible even with the controls hidden.
+    private func showFavoriteHUD(_ isFavorite: Bool) {
+        favoriteHUD.image = UIImage(systemName: isFavorite ? "heart.fill" : "heart.slash.fill",
+                                    withConfiguration: UIImage.SymbolConfiguration(pointSize: 72, weight: .medium))
+        favoriteHUD.layer.removeAllAnimations()
+        favoriteHUD.alpha = 1
+        favoriteHUD.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.5, initialSpringVelocity: 0) {
+            self.favoriteHUD.transform = .identity
+        }
+        UIView.animate(withDuration: 0.3, delay: 0.6, options: [.beginFromCurrentState]) {
+            self.favoriteHUD.alpha = 0
+        }
+    }
+
+    // MARK: Transparency
+
+    @objc private func cycleTransparencyBackground() {
+        let next = Settings.transparencyBackground.next
+        Settings.transparencyBackground = next
+        showToast("Background: \(next.title)")
+    }
+
+    private func showToast(_ text: String) {
+        toastLabel.text = text
+        toastLabel.layer.removeAllAnimations()
+        toastLabel.alpha = 1
+        UIView.animate(withDuration: 0.3, delay: 1.0, options: [.beginFromCurrentState]) {
+            self.toastLabel.alpha = 0
+        }
+    }
+
     @objc private func showInfo() {
         guard !items.isEmpty else { return }
         stopSlideshow()
@@ -299,6 +384,8 @@ final class ViewerViewController: UIViewController {
             UIKeyCommand(title: "Last", action: #selector(last), input: UIKeyCommand.inputEnd),
             UIKeyCommand(title: "Close", action: #selector(close), input: UIKeyCommand.inputEscape),
             UIKeyCommand(title: "Info", action: #selector(showInfo), input: "i"),
+            UIKeyCommand(title: "Favorite", action: #selector(toggleFavorite), input: "f"),
+            UIKeyCommand(title: "Transparency Background", action: #selector(cycleTransparencyBackground), input: "b"),
             UIKeyCommand(title: "Slideshow", action: #selector(toggleSlideshow), input: "s"),
             UIKeyCommand(title: "Toggle Controls", action: #selector(toggleChrome), input: "h"),
         ]
@@ -330,5 +417,19 @@ extension ViewerViewController: UIPageViewControllerDataSource, UIPageViewContro
         guard completed, let page = pageViewController.viewControllers?.first as? ZoomPageViewController else { return }
         currentIndex = page.index
         didChangeIndex()
+    }
+}
+
+/// Label with comfortable padding, used for short on-screen messages.
+final class PaddedLabel: UILabel {
+    var insets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: insets))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        let size = super.intrinsicContentSize
+        return CGSize(width: size.width + insets.left + insets.right, height: size.height + insets.top + insets.bottom)
     }
 }

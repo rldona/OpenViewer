@@ -1,10 +1,12 @@
 import UIKit
 
-/// Square image cell. Image loading is cancelled as soon as the cell is reused.
+/// Image cell. Image loading is cancelled as soon as the cell is reused.
 final class ThumbnailCell: UICollectionViewCell {
     static let reuseID = "ThumbnailCell"
 
     private let imageView = UIImageView()
+    private let favoriteBadge = UIImageView(image: UIImage(systemName: "heart.fill",
+                                                           withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)))
     private var token: LoadToken?
     private var representedURL: URL?
 
@@ -17,6 +19,19 @@ final class ThumbnailCell: UICollectionViewCell {
         imageView.frame = contentView.bounds
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         contentView.addSubview(imageView)
+
+        favoriteBadge.tintColor = .white
+        favoriteBadge.layer.shadowColor = UIColor.black.cgColor
+        favoriteBadge.layer.shadowOpacity = 0.5
+        favoriteBadge.layer.shadowRadius = 2
+        favoriteBadge.layer.shadowOffset = .zero
+        favoriteBadge.isHidden = true
+        favoriteBadge.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(favoriteBadge)
+        NSLayoutConstraint.activate([
+            favoriteBadge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
+            favoriteBadge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+        ])
         isAccessibilityElement = true
         accessibilityTraits = .image
     }
@@ -30,6 +45,7 @@ final class ThumbnailCell: UICollectionViewCell {
     func configure(with item: ImageItem, pixelSize: Int) {
         representedURL = item.url
         accessibilityLabel = item.name
+        updateFavorite()
         let request = ImagePipeline.Request(item, maxPixel: pixelSize)
         if let image = ImagePipeline.thumbnails.cachedImage(for: request) {
             setImage(image)
@@ -53,6 +69,18 @@ final class ThumbnailCell: UICollectionViewCell {
         }
     }
 
+    /// Transparent images show the chosen background; until an image arrives the cell keeps a faint placeholder.
+    func updateBackground() {
+        contentView.backgroundColor = imageView.image == nil || imageView.contentMode == .center
+            ? .quaternarySystemFill : Settings.transparencyBackground.color
+    }
+
+    func updateFavorite() {
+        let isFavorite = representedURL.map(FavoritesStore.shared.contains) ?? false
+        favoriteBadge.isHidden = !isFavorite
+        accessibilityValue = isFavorite ? "Favorite" : nil
+    }
+
     private func setImage(_ image: UIImage?) {
         if let image {
             imageView.contentMode = .scaleAspectFill
@@ -63,6 +91,7 @@ final class ThumbnailCell: UICollectionViewCell {
             imageView.tintColor = .tertiaryLabel
             imageView.image = UIImage(systemName: "exclamationmark.triangle")
         }
+        updateBackground()
     }
 
     override func prepareForReuse() {
@@ -71,6 +100,7 @@ final class ThumbnailCell: UICollectionViewCell {
         token = nil
         representedURL = nil
         imageView.image = nil
+        updateBackground()
     }
 }
 
@@ -80,6 +110,8 @@ final class FolderCell: UICollectionViewCell {
 
     private let coverView = UIImageView()
     private let nameLabel = UILabel()
+    private let favoriteBadge = UIImageView(image: UIImage(systemName: "heart.fill",
+                                                           withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)))
     private let detailLabel = UILabel()
     private var token: LoadToken?
     private var representedURL: URL?
@@ -106,7 +138,13 @@ final class FolderCell: UICollectionViewCell {
         chevron.tintColor = .tertiaryLabel
         chevron.setContentHuggingPriority(.required, for: .horizontal)
 
-        let labels = UIStackView(arrangedSubviews: [nameLabel, detailLabel])
+        favoriteBadge.tintColor = .systemPink
+        favoriteBadge.isHidden = true
+        favoriteBadge.setContentHuggingPriority(.required, for: .horizontal)
+        let titleRow = UIStackView(arrangedSubviews: [nameLabel, favoriteBadge])
+        titleRow.spacing = 6
+        titleRow.alignment = .center
+        let labels = UIStackView(arrangedSubviews: [titleRow, detailLabel])
         labels.axis = .vertical
         labels.spacing = 2
         let row = UIStackView(arrangedSubviews: [coverView, labels, chevron])
@@ -134,6 +172,7 @@ final class FolderCell: UICollectionViewCell {
     func configure(with folder: FolderItem) {
         representedURL = folder.url
         nameLabel.text = folder.name
+        updateFavorite()
         accessibilityLabel = folder.name
         if let info = FolderInfoCache.shared.cached(folder.url) {
             apply(info, for: folder.url)
@@ -145,6 +184,12 @@ final class FolderCell: UICollectionViewCell {
                 self.apply(info, for: folder.url)
             }
         }
+    }
+
+    func updateFavorite() {
+        let isFavorite = representedURL.map(FavoriteFoldersStore.shared.contains) ?? false
+        favoriteBadge.isHidden = !isFavorite
+        accessibilityHint = isFavorite ? "Favorite folder" : nil
     }
 
     private func apply(_ info: FolderInfoCache.Info, for url: URL) {

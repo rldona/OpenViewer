@@ -48,6 +48,11 @@ final class ZoomPageViewController: UIViewController, UIScrollViewDelegate {
         view.addSubview(scrollView)
 
         imageView.contentMode = .scaleAspectFit
+        // The image view is sized exactly to the image, so this only shows through transparent pixels.
+        imageView.backgroundColor = Settings.transparencyBackground.color
+        NotificationCenter.default.addObserver(forName: TransparencyBackground.didChange, object: nil, queue: .main) { [weak self] _ in
+            self?.imageView.backgroundColor = Settings.transparencyBackground.color
+        }
         imageView.isAccessibilityElement = true
         imageView.accessibilityLabel = item.name
         imageView.accessibilityTraits = .image

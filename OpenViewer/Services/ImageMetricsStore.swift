@@ -1,48 +1,60 @@
 import Foundation
 import UIKit
 
-/// Persistent cache of image aspect ratios (width / height), so the justified grid can lay out
-/// a folder instantly the second time it is opened. Thread-safe.
-final class AspectRatioStore {
-    static let shared = AspectRatioStore()
+/// What the grid needs to know about an image before decoding it.
+struct ImageMetrics: Equatable {
+    /// Width / height, clamped to a range the grid can display.
+    var ratio: CGFloat
+    /// Longest side in pixels (0 when the file could not be read).
+    var maxSide: Int
+}
+
+/// Persistent cache of image metrics, so the justified grid and the minimum-size filter work
+/// instantly the second time a folder is opened. Thread-safe.
+final class ImageMetricsStore {
+    static let shared = ImageMetricsStore()
 
     /// Ratio used while the real one is still unknown.
-    static let placeholder: CGFloat = 4.0 / 3.0
+    static let placeholderRatio: CGFloat = 4.0 / 3.0
 
-    private var ratios: [String: Float] = [:]
+    /// Path → [ratio, maxSide].
+    private var entries: [String: [Float]] = [:]
     private var dirty = false
     private let lock = NSLock()
     private let fileURL: URL?
-    private let saveQueue = DispatchQueue(label: "openviewer.aspects", qos: .utility)
+    private let saveQueue = DispatchQueue(label: "openviewer.metrics", qos: .utility)
 
     private init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        fileURL = caches?.appendingPathComponent("OpenViewer/aspect-ratios.plist")
+        fileURL = caches?.appendingPathComponent("OpenViewer/image-metrics.plist")
         if let fileURL, let data = try? Data(contentsOf: fileURL),
-           let stored = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Float] {
-            ratios = stored
+           let stored = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: [Float]] {
+            entries = stored
         }
         NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                object: nil, queue: nil) { [weak self] _ in self?.save() }
     }
 
-    func ratio(for url: URL) -> CGFloat? {
+    func metrics(for url: URL) -> ImageMetrics? {
         lock.lock()
         defer { lock.unlock() }
-        return ratios[url.path].map { CGFloat($0) }
+        guard let values = entries[url.path], values.count == 2 else { return nil }
+        return ImageMetrics(ratio: CGFloat(values[0]), maxSide: Int(values[1]))
     }
 
-    func set(_ ratio: CGFloat, for url: URL) {
+    func set(_ metrics: ImageMetrics, for url: URL) {
         lock.lock()
-        ratios[url.path] = Float(ratio)
+        entries[url.path] = [Float(metrics.ratio), Float(metrics.maxSide)]
         dirty = true
         lock.unlock()
     }
 
-    /// Reads the ratio from the file header only (no pixel decoding).
-    static func readRatio(of url: URL) -> CGFloat {
-        guard let size = ImagePipeline.pixelSize(of: url), size.width > 0, size.height > 0 else { return 1 }
-        return clamp(size.width / size.height)
+    /// Reads the metrics from the file header only (no pixel decoding).
+    static func read(_ url: URL) -> ImageMetrics {
+        guard let size = ImagePipeline.pixelSize(of: url), size.width > 0, size.height > 0 else {
+            return ImageMetrics(ratio: 1, maxSide: 0)
+        }
+        return ImageMetrics(ratio: clamp(size.width / size.height), maxSide: Int(max(size.width, size.height)))
     }
 
     /// Keeps extreme panoramas and slivers usable in the grid.
@@ -53,7 +65,7 @@ final class AspectRatioStore {
     func save() {
         lock.lock()
         guard dirty, let fileURL else { lock.unlock(); return }
-        let snapshot = ratios
+        let snapshot = entries
         dirty = false
         lock.unlock()
         saveQueue.async {
@@ -64,21 +76,21 @@ final class AspectRatioStore {
     }
 }
 
-/// Resolves unknown aspect ratios in the background, visible items first, and reports them in
-/// batches on the main queue.
-final class AspectResolver {
+/// Reads unknown image metrics in the background, prioritised items first, and signals the main
+/// queue in batches. Results are written straight to `ImageMetricsStore`.
+final class MetricsResolver {
     private let urls: [URL]
     private var handedOut: [Bool]
     private var cursor = 0
     private var priority: Range<Int>?
-    private var pending: [(Int, CGFloat)] = []
+    private var pendingCount = 0
     private var lastFlush = CFAbsoluteTimeGetCurrent()
     private var cancelled = false
     private let lock = NSLock()
-    private let onBatch: ([(index: Int, ratio: CGFloat)]) -> Void
+    private let onBatch: () -> Void
 
-    /// `known[i]` is true when item `i` already has a ratio.
-    init(urls: [URL], known: [Bool], onBatch: @escaping ([(index: Int, ratio: CGFloat)]) -> Void) {
+    /// `known[i]` is true when `urls[i]` already has metrics in the store.
+    init(urls: [URL], known: [Bool], onBatch: @escaping () -> Void) {
         self.urls = urls
         self.handedOut = known
         self.onBatch = onBatch
@@ -90,15 +102,14 @@ final class AspectResolver {
         for _ in 0..<workers {
             DispatchQueue.global(qos: .utility).async(group: group) { [self] in
                 while let index = next() {
-                    let ratio = AspectRatioStore.readRatio(of: urls[index])
-                    AspectRatioStore.shared.set(ratio, for: urls[index])
-                    record(index, ratio)
+                    ImageMetricsStore.shared.set(ImageMetricsStore.read(urls[index]), for: urls[index])
+                    recordOne()
                 }
             }
         }
         group.notify(queue: .global(qos: .utility)) { [self] in
             flush(force: true)
-            AspectRatioStore.shared.save()
+            ImageMetricsStore.shared.save()
         }
     }
 
@@ -137,9 +148,9 @@ final class AspectResolver {
         return nil
     }
 
-    private func record(_ index: Int, _ ratio: CGFloat) {
+    private func recordOne() {
         lock.lock()
-        pending.append((index, ratio))
+        pendingCount += 1
         lock.unlock()
         flush(force: false)
     }
@@ -147,16 +158,15 @@ final class AspectResolver {
     private func flush(force: Bool) {
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
-        guard !cancelled, !pending.isEmpty, force || now - lastFlush > 0.3 else { lock.unlock(); return }
-        let batch = pending.map { (index: $0.0, ratio: $0.1) }
-        pending.removeAll()
+        guard !cancelled, pendingCount > 0, force || now - lastFlush > 0.3 else { lock.unlock(); return }
+        pendingCount = 0
         lastFlush = now
         lock.unlock()
         DispatchQueue.main.async { [self] in
             lock.lock()
             let isCancelled = cancelled
             lock.unlock()
-            if !isCancelled { onBatch(batch) }
+            if !isCancelled { onBatch() }
         }
     }
 }

@@ -9,7 +9,8 @@ final class BrowserViewController: UIViewController {
 
     private final class CancelFlag { var cancelled = false }
 
-    let folderURL: URL
+    /// `nil` for the cross-folder Favorites view.
+    let folderURL: URL?
     private let displayName: String
 
     private var collectionView: UICollectionView!
@@ -29,7 +30,11 @@ final class BrowserViewController: UIViewController {
     private let layout = GalleryLayout()
     /// Aspect ratio of each entry in `images`; placeholders until resolved.
     private var ratios: [CGFloat] = []
-    private var resolver: AspectResolver?
+    private var resolver: MetricsResolver?
+    /// `images[i] == allImages[sourceIndices[i]]`, so visible items can be prioritised by the resolver.
+    private var sourceIndices: [Int] = []
+    private var hiddenSmallCount = 0
+    private var minimumSide = Settings.minimumImageSide
     private var contentGeneration = 0
     private var prefetchTokens: [IndexPath: LoadToken] = [:]
     private var menuButton: UIBarButtonItem!
@@ -39,6 +44,18 @@ final class BrowserViewController: UIViewController {
         self.displayName = displayName ?? folderURL.lastPathComponent
         super.init(nibName: nil, bundle: nil)
     }
+
+    /// Every favourite image across all folders.
+    init(favorites: ()) {
+        self.folderURL = nil
+        self.displayName = "Favorites"
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    private var isFavoritesView: Bool { folderURL == nil }
+    private var favoritesOnly = false
+    private var showsOnlyFavorites: Bool { favoritesOnly || isFavoritesView }
+    private var needsRefilter = false
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -92,7 +109,37 @@ final class BrowserViewController: UIViewController {
         slideshow.accessibilityLabel = "Slideshow"
         navigationItem.rightBarButtonItems = [menuButton, slideshow]
 
+        NotificationCenter.default.addObserver(self, selector: #selector(favoritesChanged(_:)),
+                                               name: FavoritesStore.didChange, object: nil)
+        NotificationCenter.default.addObserver(forName: TransparencyBackground.didChange, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            for case let cell as ThumbnailCell in self.collectionView.visibleCells { cell.updateBackground() }
+            self.menuButton.menu = self.makeMenu()
+        }
         reload()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        if needsRefilter {
+            needsRefilter = false
+            applyFilter()
+        }
+    }
+
+    @objc private func favoritesChanged(_ notification: Notification) {
+        menuButton.menu = makeMenu()
+        for case let cell as FolderCell in collectionView.visibleCells { cell.updateFavorite() }
+        guard showsOnlyFavorites else {
+            for case let cell as ThumbnailCell in collectionView.visibleCells { cell.updateFavorite() }
+            return
+        }
+        // Don't reshuffle the grid under the viewer; refilter once it is back on screen.
+        if presentedViewController != nil {
+            needsRefilter = true
+        } else {
+            applyFilter()
+        }
     }
 
     override var keyCommands: [UIKeyCommand]? {
@@ -101,6 +148,7 @@ final class BrowserViewController: UIViewController {
             UIKeyCommand(title: "Larger Thumbnails", action: #selector(zoomIn), input: "=", modifierFlags: .command),
             UIKeyCommand(title: "Smaller Thumbnails", action: #selector(zoomOut), input: "-", modifierFlags: .command),
             UIKeyCommand(title: "Include Subfolders", action: #selector(toggleSubfolders), input: "r", modifierFlags: .command),
+            UIKeyCommand(title: "Favorites Only", action: #selector(toggleFavoritesOnly), input: "l", modifierFlags: .command),
             UIKeyCommand(title: "Search", action: #selector(focusSearch), input: "f", modifierFlags: .command),
             UIKeyCommand(title: "Slideshow", action: #selector(startSlideshow), input: "p", modifierFlags: .command),
             UIKeyCommand(title: "Back", action: #selector(goBack), input: UIKeyCommand.inputLeftArrow, modifierFlags: .command),
@@ -113,11 +161,27 @@ final class BrowserViewController: UIViewController {
         scanFlag?.cancelled = true
         let flag = CancelFlag()
         scanFlag = flag
-        let url = folderURL
         let order = Settings.sortOrder
-        let recursive = includeSubfolders
         isScanning = true
         updateStatus()
+
+        guard let url = folderURL else {
+            let favorites = FavoritesStore.shared.urls
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                // Files on drives or servers that are not connected right now are skipped.
+                let images = favorites.compactMap { url -> ImageItem? in
+                    guard let values = try? url.resourceValues(forKeys: FolderScanner.keys), values.isDirectory != true else { return nil }
+                    return ImageItem(url: url, size: values.fileSize ?? 0, modified: values.contentModificationDate ?? .distantPast)
+                }.sorted(by: order, byPath: true)
+                DispatchQueue.main.async {
+                    guard let self, !flag.cancelled else { return }
+                    self.isScanning = false
+                    self.setContent(folders: [], images: images)
+                }
+            }
+            return
+        }
+        let recursive = includeSubfolders
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             if !recursive {
@@ -155,7 +219,7 @@ final class BrowserViewController: UIViewController {
     private func resort() {
         guard !isScanning else { reload(); return }
         let order = Settings.sortOrder
-        let recursive = includeSubfolders
+        let recursive = includeSubfolders || isFavoritesView
         let folders = allFolders
         let images = allImages
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -170,66 +234,118 @@ final class BrowserViewController: UIViewController {
     private func setContent(folders: [FolderItem], images: [ImageItem]) {
         allFolders = folders
         allImages = images
+        startResolver()
         applyFilter()
     }
 
     private func applyFilter() {
-        if query.isEmpty {
-            folders = allFolders
-            images = allImages
-        } else {
-            folders = allFolders.filter { $0.name.localizedCaseInsensitiveContains(query) }
-            images = allImages.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        let store = ImageMetricsStore.shared
+        let favorites = FavoritesStore.shared
+        let minimumSide = self.minimumSide
+        folders = query.isEmpty ? allFolders : allFolders.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        if isFavoritesView { folders = [] }
+
+        var images: [ImageItem] = []
+        var sourceIndices: [Int] = []
+        var ratios: [CGFloat] = []
+        var hidden = 0
+        images.reserveCapacity(allImages.count)
+        for (index, item) in allImages.enumerated() {
+            if !query.isEmpty && !item.name.localizedCaseInsensitiveContains(query) { continue }
+            if showsOnlyFavorites && !favorites.contains(item.url) { continue }
+            let metrics = store.metrics(for: item.url)
+            // Unknown sizes stay visible until the resolver has read them.
+            if minimumSide > 0, let metrics, metrics.maxSide > 0, metrics.maxSide < minimumSide {
+                hidden += 1
+                continue
+            }
+            images.append(item)
+            sourceIndices.append(index)
+            ratios.append(metrics?.ratio ?? ImageMetricsStore.placeholderRatio)
         }
+        self.images = images
+        self.sourceIndices = sourceIndices
+        self.ratios = ratios
+        hiddenSmallCount = hidden
+
         prefetchTokens.values.forEach { ImagePipeline.thumbnails.cancel($0) }
         prefetchTokens.removeAll()
-
-        let store = AspectRatioStore.shared
-        var known = [Bool](repeating: false, count: images.count)
-        ratios = images.indices.map { index in
-            guard let ratio = store.ratio(for: images[index].url) else { return AspectRatioStore.placeholder }
-            known[index] = true
-            return ratio
-        }
         layout.ratios = ratios
         collectionView.reloadData()
         updateStatus()
-        startResolver(known: known)
     }
 
-    // MARK: Aspect ratios
+    // MARK: Image metrics
 
-    /// Reads unknown aspect ratios from file headers in the background, visible items first.
-    private func startResolver(known: [Bool]) {
+    private var needsMetrics: Bool { layout.style == .justified || minimumSide > 0 }
+
+    /// Reads unknown image sizes from file headers in the background, visible items first.
+    private func startResolver() {
         resolver?.cancel()
         resolver = nil
         contentGeneration += 1
-        guard layout.style == .justified, known.contains(false) else { return }
+        guard needsMetrics else { return }
+        let store = ImageMetricsStore.shared
+        let known = allImages.map { store.metrics(for: $0.url) != nil }
+        guard known.contains(false) else { return }
         let generation = contentGeneration
-        let resolver = AspectResolver(urls: images.map(\.url), known: known) { [weak self] batch in
+        let resolver = MetricsResolver(urls: allImages.map(\.url), known: known) { [weak self] in
             guard let self, generation == self.contentGeneration else { return }
-            self.applyRatios(batch)
+            self.metricsResolved()
         }
         self.resolver = resolver
-        if let visible = visibleImageRange() { resolver.prioritize(visible) }
+        prioritizeVisible()
         resolver.start()
     }
 
-    private func applyRatios(_ batch: [(index: Int, ratio: CGFloat)]) {
+    private func prioritizeVisible() {
+        guard let resolver, let visible = visibleImageRange(), !visible.isEmpty else {
+            if let resolver, !allImages.isEmpty { resolver.prioritize(0..<min(allImages.count, 120)) }
+            return
+        }
+        let low = sourceIndices[visible.lowerBound]
+        let high = sourceIndices[visible.upperBound - 1]
+        resolver.prioritize(low..<(high + 1))
+    }
+
+    private func metricsResolved() {
+        if minimumSide > 0 {
+            // Items may disappear: rebuild the list, keeping the first visible image in place.
+            refilterKeepingPosition()
+            return
+        }
+        let store = ImageMetricsStore.shared
         var changed = false
-        for (index, ratio) in batch where index < ratios.count && abs(ratios[index] - ratio) > 0.001 {
-            ratios[index] = ratio
-            changed = true
+        for (index, item) in images.enumerated() {
+            if let ratio = store.metrics(for: item.url)?.ratio, abs(ratios[index] - ratio) > 0.001 {
+                ratios[index] = ratio
+                changed = true
+            }
         }
         guard changed else { return }
         relayoutKeepingPosition(animated: false) { self.layout.ratios = self.ratios }
     }
 
+    private func refilterKeepingPosition() {
+        let offsetY = collectionView.contentOffset.y
+        let atTop = offsetY <= -collectionView.adjustedContentInset.top + 1
+        let anchorIndex = collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }.map(\.item).min()
+        let anchorURL = anchorIndex.map { images[$0].url }
+        let oldMinY = anchorIndex.flatMap { layout.imageFrame(at: $0)?.minY }
+
+        applyFilter()
+        collectionView.layoutIfNeeded()
+        guard !atTop, let anchorURL, let oldMinY,
+              let newIndex = images.firstIndex(where: { $0.url == anchorURL }),
+              let newMinY = layout.imageFrame(at: newIndex)?.minY else { return }
+        let maxOffset = max(-collectionView.adjustedContentInset.top,
+                            collectionView.contentSize.height - collectionView.bounds.height + collectionView.adjustedContentInset.bottom)
+        collectionView.contentOffset.y = min(offsetY + newMinY - oldMinY, maxOffset)
+    }
+
     private func visibleImageRange(margin: Int = 60) -> Range<Int>? {
         let visible = collectionView.indexPathsForVisibleItems.filter { $0.section == Section.images.rawValue }.map(\.item)
-        guard let low = visible.min(), let high = visible.max() else {
-            return images.isEmpty ? nil : 0..<min(images.count, margin * 2)
-        }
+        guard let low = visible.min(), let high = visible.max() else { return nil }
         return max(0, low - margin)..<min(images.count, high + margin + 1)
     }
 
@@ -268,12 +384,20 @@ final class BrowserViewController: UIViewController {
         var parts: [String] = []
         if !folders.isEmpty { parts.append("\(folders.count.formatted()) folder\(folders.count == 1 ? "" : "s")") }
         parts.append("\(images.count.formatted()) image\(images.count == 1 ? "" : "s")")
+        if hiddenSmallCount > 0 { parts.append("\(hiddenSmallCount.formatted()) small hidden") }
         if isScanning { parts.append(includeSubfolders ? "scanning…" : "loading…") }
-        if includeSubfolders { parts.insert("All subfolders", at: 0) }
+        if includeSubfolders && !isFavoritesView { parts.insert("All subfolders", at: 0) }
+        if favoritesOnly { parts.insert("Favorites", at: 0) }
         titleView.subtitleLabel.text = parts.joined(separator: " · ")
 
         if !isScanning && folders.isEmpty && images.isEmpty {
-            emptyLabel.text = query.isEmpty ? "No images here" : "No matches for “\(query)”"
+            if !query.isEmpty {
+                emptyLabel.text = "No matches for “\(query)”"
+            } else if showsOnlyFavorites {
+                emptyLabel.text = "No favorites yet\nTap ♥︎ in the viewer, press F, or long-press a thumbnail."
+            } else {
+                emptyLabel.text = "No images here"
+            }
             collectionView.backgroundView = emptyLabel
         } else {
             collectionView.backgroundView = nil
@@ -296,9 +420,7 @@ final class BrowserViewController: UIViewController {
         Settings.gridStyle = style
         relayoutKeepingPosition(animated: true) { self.layout.style = style }
         menuButton.menu = makeMenu()
-        if style == .justified {
-            startResolver(known: images.map { AspectRatioStore.shared.ratio(for: $0.url) != nil })
-        }
+        startResolver()
     }
 
     @objc private func handlePinch(_ pinch: UIPinchGestureRecognizer) {
@@ -344,29 +466,73 @@ final class BrowserViewController: UIViewController {
                               attributes: gridLevel == Self.gridLevels.count - 1 ? .disabled : []) { [weak self] _ in self?.zoomIn() }
         let smaller = UIAction(title: "Smaller Thumbnails", image: UIImage(systemName: "minus.magnifyingglass"),
                                attributes: gridLevel == 0 ? .disabled : []) { [weak self] _ in self?.zoomOut() }
+        let favoritesOnlyAction = UIAction(title: "Favorites Only", image: UIImage(systemName: "heart"),
+                                           state: favoritesOnly ? .on : .off) { [weak self] _ in
+            self?.toggleFavoritesOnly()
+        }
         let styleActions = [
             UIAction(title: "Original Proportions", image: UIImage(systemName: "rectangle.3.group"),
                      state: layout.style == .justified ? .on : .off) { [weak self] _ in self?.setGridStyle(.justified) },
             UIAction(title: "Square", image: UIImage(systemName: "square.grid.3x3"),
                      state: layout.style == .square ? .on : .off) { [weak self] _ in self?.setGridStyle(.square) },
         ]
+        let sizeActions = [0, 32, 64, 128, 256].map { side in
+            UIAction(title: side == 0 ? "Show All Sizes" : "Hide Smaller Than \(side) px",
+                     state: minimumSide == side ? .on : .off) { [weak self] _ in self?.setMinimumSide(side) }
+        }
+        let current = Settings.transparencyBackground
+        let backgroundActions = TransparencyBackground.allCases.map { background in
+            UIAction(title: background.title, state: background == current ? .on : .off) { [weak self] _ in
+                Settings.transparencyBackground = background
+                self?.menuButton.menu = self?.makeMenu()
+            }
+        }
+        var folderActions: [UIMenuElement] = []
+        if let folderURL {
+            let isFavorite = FavoriteFoldersStore.shared.contains(folderURL)
+            folderActions.append(UIAction(title: isFavorite ? "Remove Folder from Favorites" : "Add Folder to Favorites",
+                                          image: UIImage(systemName: isFavorite ? "heart.slash" : "folder.badge.plus")) { _ in
+                FavoriteFoldersStore.shared.toggle(folderURL)
+            })
+        }
         let refresh = UIAction(title: "Refresh", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
             FolderInfoCache.shared.invalidate()
             self?.reload()
         }
         return UIMenu(children: [
-            UIMenu(options: .displayInline, children: [recursive]),
+            UIMenu(options: .displayInline, children: isFavoritesView ? [] : [recursive, favoritesOnlyAction]),
             UIMenu(title: "Sort By", image: UIImage(systemName: "arrow.up.arrow.down"), children: [
                 UIMenu(options: .displayInline, children: sortActions),
                 UIMenu(options: .displayInline, children: directionActions),
             ]),
             UIMenu(options: .displayInline, children: styleActions),
             UIMenu(options: .displayInline, children: [larger, smaller]),
-            UIMenu(options: .displayInline, children: [refresh]),
+            UIMenu(title: "Image Size", subtitle: minimumSide == 0 ? "All" : "≥ \(minimumSide) px",
+                   image: UIImage(systemName: "line.3.horizontal.decrease.circle"), children: sizeActions),
+            UIMenu(title: "Transparency", subtitle: current.title,
+                   image: UIImage(systemName: "checkerboard.rectangle"), children: backgroundActions),
+            UIMenu(options: .displayInline, children: folderActions + [refresh]),
         ])
     }
 
+    private func setMinimumSide(_ side: Int) {
+        guard side != minimumSide else { return }
+        minimumSide = side
+        Settings.minimumImageSide = side
+        menuButton.menu = makeMenu()
+        startResolver()
+        applyFilter()
+    }
+
+    @objc private func toggleFavoritesOnly() {
+        guard !isFavoritesView else { return }
+        favoritesOnly.toggle()
+        menuButton.menu = makeMenu()
+        applyFilter()
+    }
+
     @objc private func toggleSubfolders() {
+        guard !isFavoritesView else { return }
         includeSubfolders.toggle()
         Settings.includeSubfolders = includeSubfolders
         menuButton.menu = makeMenu()
@@ -453,7 +619,7 @@ extension BrowserViewController: UICollectionViewDataSourcePrefetching {
 
 extension BrowserViewController: UICollectionViewDelegate {
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        if let resolver, let visible = visibleImageRange() { resolver.prioritize(visible) }
+        prioritizeVisible()
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
@@ -480,7 +646,20 @@ extension BrowserViewController: UICollectionViewDelegate {
             let copyName = UIAction(title: "Copy Name", image: UIImage(systemName: "doc.on.doc")) { _ in
                 UIPasteboard.general.string = url.lastPathComponent
             }
-            return UIMenu(children: [share, copyName])
+            guard indexPath.section == Section.images.rawValue else {
+                let isFavorite = FavoriteFoldersStore.shared.contains(url)
+                let favorite = UIAction(title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                                        image: UIImage(systemName: isFavorite ? "heart.slash" : "heart")) { _ in
+                    FavoriteFoldersStore.shared.toggle(url)
+                }
+                return UIMenu(children: [favorite, share, copyName])
+            }
+            let isFavorite = FavoritesStore.shared.contains(url)
+            let favorite = UIAction(title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                                    image: UIImage(systemName: isFavorite ? "heart.slash" : "heart")) { _ in
+                FavoritesStore.shared.toggle(url)
+            }
+            return UIMenu(children: [favorite, share, copyName])
         }
     }
 }

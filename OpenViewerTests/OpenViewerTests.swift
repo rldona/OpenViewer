@@ -89,6 +89,19 @@ final class OpenViewerTests: XCTestCase {
         wait(for: [settle], timeout: 2)
     }
 
+    func testMetricsReadFromHeader() {
+        let metrics = ImageMetricsStore.read(root.appendingPathComponent("a/b/big.png"))
+        XCTAssertEqual(metrics.maxSide, 3000)
+        XCTAssertEqual(metrics.ratio, 2, accuracy: 0.001)
+        XCTAssertEqual(ImageMetricsStore.read(root.appendingPathComponent("notes.txt")).maxSide, 0)
+    }
+
+    func testTransparencyBackgroundCycles() {
+        var background = TransparencyBackground.checkerboard
+        for _ in TransparencyBackground.allCases { background = background.next }
+        XCTAssertEqual(background, .checkerboard)
+    }
+
     func testThumbnailBuckets() {
         XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 100), 256)
         XCTAssertEqual(ImagePipeline.thumbnailBucket(forPixels: 300), 512)
