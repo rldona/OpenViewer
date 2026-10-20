@@ -4,9 +4,21 @@ import UniformTypeIdentifiers
 /// The library: always-visible sidebar on iPad (open a folder, favourites, pinned folders, recents).
 /// In a compact window the same list is the root screen and pushes folders onto its own stack.
 final class SidebarViewController: UIViewController {
-    private enum Section: Int, CaseIterable { case open, library, pinned, recent }
+    private enum Section: String, CaseIterable {
+        case library, pinned, recent
+
+        var title: String {
+            switch self {
+            case .library: return "Library"
+            case .pinned: return "Pinned Folders"
+            case .recent: return "Recent"
+            }
+        }
+    }
 
     private enum Row: Hashable {
+        /// Collapsible section title (Photos-style chevron).
+        case header(Section)
         case pickFolder
         case favorites(Int)
         case appDocuments
@@ -34,7 +46,8 @@ final class SidebarViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "OpenViewer"
-        navigationItem.largeTitleDisplayMode = .always
+        // A small title leaves the room for the library itself.
+        navigationItem.largeTitleDisplayMode = .never
         let openButton = UIBarButtonItem(
             image: UIImage(systemName: "folder.badge.plus"), style: .plain, target: self, action: #selector(pickFolder))
         openButton.accessibilityLabel = "Open Folder"
@@ -43,14 +56,22 @@ final class SidebarViewController: UIViewController {
         navigationItem.rightBarButtonItems = [settingsButton, openButton]
 
         var config = UICollectionLayoutListConfiguration(appearance: showsSelection ? .sidebar : .insetGrouped)
-        config.headerMode = .supplementary
-        config.backgroundColor = showsSelection ? Theme.sidebarBackground : nil
+        config.headerMode = .firstItemInSection
+        if showsSelection {
+            // Clear on iOS 26 so the system's floating glass sidebar shows the grid through it.
+            if #available(iOS 26.0, *) {
+                config.backgroundColor = .clear
+            } else {
+                config.backgroundColor = Theme.sidebarBackground
+            }
+        }
         config.trailingSwipeActionsConfigurationProvider = { [weak self] indexPath in
             self?.swipeActions(at: indexPath)
         }
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: UICollectionViewCompositionalLayout.list(using: config))
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.delegate = self
+        collectionView.allowsSelectionDuringEditing = false
         view.addSubview(collectionView)
 
         let cellRegistration = UICollectionView.CellRegistration<UICollectionViewListCell, Row> { cell, _, row in
@@ -76,29 +97,50 @@ final class SidebarViewController: UIViewController {
             case .recent(let bookmark):
                 content.text = bookmark.name
                 content.image = UIImage(systemName: "folder.fill")
+            case .header:
+                break
             }
             content.prefersSideBySideTextAndSecondaryText = true
             content.secondaryTextProperties.color = .secondaryLabel
             cell.contentConfiguration = content
-            cell.accessories = []
-        }
-        let headerRegistration = UICollectionView.SupplementaryRegistration<UICollectionViewListCell>(
-            elementKind: UICollectionView.elementKindSectionHeader
-        ) { [weak self] header, _, indexPath in
-            var content = UIListContentConfiguration.sidebarHeader()
-            switch self?.dataSource.sectionIdentifier(for: indexPath.section) {
-            case .library: content.text = "Library"
-            case .pinned: content.text = "Pinned Folders"
-            case .recent: content.text = "Recent"
-            default: content.text = nil
+            // In edit mode (like Photos): pinned folders get a grip to drag; both lists can remove rows.
+            switch row {
+            case .favoriteFolder:
+                cell.accessories = [.delete(displayed: .whenEditing), .reorder(displayed: .whenEditing)]
+            case .recent:
+                cell.accessories = [.delete(displayed: .whenEditing)]
+            default:
+                cell.accessories = []
             }
-            header.contentConfiguration = content
+        }
+        let headerRegistration = UICollectionView.CellRegistration<UICollectionViewListCell, Section> { cell, _, section in
+            var content = UIListContentConfiguration.sidebarHeader()
+            content.text = section.title
+            cell.contentConfiguration = content
+            cell.accessories = [.outlineDisclosure(options: .init(style: .header))]
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { cv, indexPath, row in
-            cv.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: row)
+            if case .header(let section) = row {
+                return cv.dequeueConfiguredReusableCell(using: headerRegistration, for: indexPath, item: section)
+            }
+            return cv.dequeueConfiguredReusableCell(using: cellRegistration, for: indexPath, item: row)
         }
-        dataSource.supplementaryViewProvider = { cv, _, indexPath in
-            cv.dequeueConfiguredReusableSupplementary(using: headerRegistration, for: indexPath)
+        dataSource.sectionSnapshotHandlers.willCollapseItem = { row in
+            if case .header(let section) = row { Self.setCollapsed(section, true) }
+        }
+        dataSource.sectionSnapshotHandlers.willExpandItem = { row in
+            if case .header(let section) = row { Self.setCollapsed(section, false) }
+        }
+        dataSource.reorderingHandlers.canReorderItem = { row in
+            if case .favoriteFolder = row { return true }
+            return false
+        }
+        dataSource.reorderingHandlers.didReorder = { transaction in
+            let ids = transaction.finalSnapshot.itemIdentifiers.compactMap { row -> UUID? in
+                if case .favoriteFolder(let folder) = row { return folder.id }
+                return nil
+            }
+            FavoriteFoldersStore.shared.reorder(ids)
         }
         NotificationCenter.default.addObserver(self, selector: #selector(libraryChanged),
                                                name: FavoritesStore.didChange, object: nil)
@@ -130,23 +172,48 @@ final class SidebarViewController: UIViewController {
 
     @objc private func libraryChanged() { reload() }
 
+    private static let collapsedKey = "sidebarCollapsedSections"
+
+    private static func isCollapsed(_ section: Section) -> Bool {
+        (UserDefaults.standard.array(forKey: collapsedKey) as? [String] ?? []).contains(section.rawValue)
+    }
+
+    private static func setCollapsed(_ section: Section, _ collapsed: Bool) {
+        var set = Set(UserDefaults.standard.array(forKey: collapsedKey) as? [String] ?? [])
+        if collapsed { set.insert(section.rawValue) } else { set.remove(section.rawValue) }
+        UserDefaults.standard.set(Array(set), forKey: collapsedKey)
+    }
+
     private func reload() {
-        var snapshot = NSDiffableDataSourceSnapshot<Section, Row>()
-        snapshot.appendSections([.open, .library])
-        snapshot.appendItems([.pickFolder], toSection: .open)
-        snapshot.appendItems([.favorites(FavoritesStore.shared.count), .appDocuments], toSection: .library)
-        let pinned = FavoriteFoldersStore.shared.items
-        if !pinned.isEmpty {
-            snapshot.appendSections([.pinned])
-            snapshot.appendItems(pinned.map(Row.favoriteFolder), toSection: .pinned)
+        let contents: [(Section, [Row])] = [
+            (.library, [.favorites(FavoritesStore.shared.count), .appDocuments]),
+            (.pinned, FavoriteFoldersStore.shared.items.map(Row.favoriteFolder)),
+            (.recent, BookmarkStore.shared.items.map(Row.recent)),
+        ].filter { !$0.1.isEmpty }
+
+        let sections = contents.map(\.0)
+        if dataSource.snapshot().sectionIdentifiers != sections {
+            var snapshot = NSDiffableDataSourceSnapshot<Section, Row>()
+            snapshot.appendSections(sections)
+            dataSource.apply(snapshot, animatingDifferences: false)
         }
-        let recents = BookmarkStore.shared.items
-        if !recents.isEmpty {
-            snapshot.appendSections([.recent])
-            snapshot.appendItems(recents.map(Row.recent), toSection: .recent)
+        for (section, rows) in contents {
+            var sectionSnapshot = NSDiffableDataSourceSectionSnapshot<Row>()
+            let header = Row.header(section)
+            sectionSnapshot.append([header])
+            sectionSnapshot.append(rows, to: header)
+            if !Self.isCollapsed(section) { sectionSnapshot.expand([header]) }
+            dataSource.apply(sectionSnapshot, to: section, animatingDifferences: false)
         }
-        dataSource.apply(snapshot, animatingDifferences: false)
         restoreSelection()
+    }
+
+    override func setEditing(_ editing: Bool, animated: Bool) {
+        super.setEditing(editing, animated: animated)
+        collectionView.isEditing = editing
+        // Only "Done" while editing; otherwise the small title keeps the top-left corner.
+        navigationItem.setLeftBarButton(editing ? editButtonItem : nil, animated: animated)
+        if !editing { restoreSelection() }
     }
 
     /// Keeps the open location highlighted; favourites' count changes the row identity, so match by kind.
@@ -194,7 +261,11 @@ final class SidebarViewController: UIViewController {
                 self?.navigationItem.rightBarButtonItems?.first?.menu = self?.makeSettingsMenu()
             }
         }
+        let edit = UIAction(title: "Edit Sidebar", image: UIImage(systemName: "list.bullet")) { [weak self] _ in
+            self?.setEditing(true, animated: true)
+        }
         return UIMenu(children: [
+            edit,
             UIMenu(title: "Appearance", subtitle: current.title, image: UIImage(systemName: "circle.lefthalf.filled"), children: appearance),
         ])
     }
@@ -209,6 +280,8 @@ final class SidebarViewController: UIViewController {
 
     private func open(_ row: Row, animated: Bool = true) {
         switch row {
+        case .header:
+            break
         case .pickFolder:
             pickFolder()
         case .favorites:
@@ -273,8 +346,23 @@ final class SidebarViewController: UIViewController {
 }
 
 extension SidebarViewController: UICollectionViewDelegate {
+    func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
+        if case .header = dataSource.itemIdentifier(for: indexPath) { return false }
+        return true
+    }
+
+    /// Pinned folders only move among themselves, below their header.
+    func collectionView(_ collectionView: UICollectionView,
+                        targetIndexPathForMoveOfItemFromOriginalIndexPath originalIndexPath: IndexPath,
+                        atCurrentIndexPath currentIndexPath: IndexPath,
+                        toProposedIndexPath proposedIndexPath: IndexPath) -> IndexPath {
+        guard proposedIndexPath.section == originalIndexPath.section else { return currentIndexPath }
+        return IndexPath(item: max(proposedIndexPath.item, 1), section: proposedIndexPath.section)
+    }
+
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard let row = dataSource.itemIdentifier(for: indexPath) else { return }
+        if case .header = row { return }
         if !showsSelection || row == .pickFolder {
             collectionView.deselectItem(at: indexPath, animated: true)
         }

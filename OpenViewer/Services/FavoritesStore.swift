@@ -141,6 +141,17 @@ final class FavoriteFoldersStore {
         set(PathKey.url(folder.path), favorite: false)
     }
 
+    /// Puts the folders in the given order (ids not listed keep their place at the end).
+    func reorder(_ ids: [UUID]) {
+        let rank = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, $0) })
+        let sorted = items.enumerated().sorted {
+            (rank[$0.element.id] ?? ids.count + $0.offset, $0.offset) < (rank[$1.element.id] ?? ids.count + $1.offset, $1.offset)
+        }.map(\.element)
+        guard sorted != items else { return }
+        items = sorted
+        save()
+    }
+
     /// The folder's URL, preferring its own bookmark so it survives being reached through a different path.
     func resolve(_ folder: FavoriteFolder) -> URL {
         var stale = false

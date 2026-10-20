@@ -151,7 +151,7 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     /// stay free for selection.
     var menuProvider: (() -> UIMenu?)?
 
-    private let mosaic = UIView()
+    private let mosaic = MosaicView()
     private let tiles = (0..<4).map { _ in UIImageView() }
     private let placeholder = UIImageView(image: UIImage(systemName: "folder.fill",
                                                          withConfiguration: UIImage.SymbolConfiguration(pointSize: 34)))
@@ -166,6 +166,7 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         mosaic.backgroundColor = .tertiarySystemFill
+        mosaic.onLayout = { [weak self] in self?.layoutTiles() }
         mosaic.layer.cornerRadius = 14
         mosaic.layer.cornerCurve = .continuous
         mosaic.clipsToBounds = true
@@ -215,11 +216,6 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        layoutTiles()
-    }
 
     /// 1 image fills the card, 2 split it, 3 = one tall + two stacked, 4 = a 2×2 grid.
     private func layoutTiles() {
@@ -289,7 +285,7 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
 
     private func setTileCount(_ count: Int) {
         tileCount = count
-        setNeedsLayout()
+        mosaic.setNeedsLayout()
     }
 
     private func apply(_ info: FolderInfoCache.Info, for url: URL) {
@@ -452,5 +448,16 @@ final class GroupHeaderView: UICollectionReusableView {
         titleLabel.text = title
         subtitleLabel.text = subtitle
         accessibilityLabel = "\(title), \(subtitle)"
+    }
+}
+
+/// Lays out its tiles from its own final bounds. Doing it from the cell's layout pass read the
+/// mosaic's previous size, so a reused cell kept tiles that left gaps at the right and bottom.
+private final class MosaicView: UIView {
+    var onLayout: (() -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
     }
 }

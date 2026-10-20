@@ -408,9 +408,7 @@ final class ViewerViewController: UIViewController {
     @objc private func share() {
         guard !items.isEmpty else { return }
         stopSlideshow()
-        let activity = UIActivityViewController(activityItems: [items[currentIndex].url], applicationActivities: nil)
-        activity.popoverPresentationController?.sourceView = shareButton
-        present(activity, animated: true)
+        ShareSheet.present([items[currentIndex].url], preview: items[currentIndex], from: self)
     }
 
     override var keyCommands: [UIKeyCommand]? {

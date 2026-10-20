@@ -182,6 +182,13 @@ final class BrowserViewController: UIViewController {
         reload()
     }
 
+    /// A small gap from the sidebar while it is on screen; edge to edge when it is hidden.
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        let sidebarShown = splitViewController.map { !$0.isCollapsed && $0.displayMode != .secondaryOnly } ?? false
+        layout.imageInset = sidebarShown ? 16 : 0
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         updateBreadcrumbs()
@@ -626,11 +633,14 @@ final class BrowserViewController: UIViewController {
 
     // MARK: Layout
 
-    private func setGridLevel(_ level: Int) {
+    private func setGridLevel(_ level: Int, fromSlider: Bool = false) {
         let clamped = min(max(level, 0), Self.gridLevels.count - 1)
         guard clamped != gridLevel else { return }
         gridLevel = clamped
         Settings.gridLevel = clamped
+        // Pinch, keyboard and menu change the size too: keep the slider in step
+        // (never while it is being dragged, or it would fight the finger).
+        if !fromSlider { sizeSlider.setValue(Float(clamped), animated: true) }
         relayoutKeepingPosition(animated: true) { self.layout.targetSize = Self.gridLevels[clamped] }
         menuButton.menu = makeMenu()
     }
@@ -690,7 +700,12 @@ final class BrowserViewController: UIViewController {
         sizeSlider.value = Float(gridLevel)
         sizeSlider.accessibilityLabel = "Thumbnail size"
         sizeSlider.addTarget(self, action: #selector(sizeSliderChanged), for: .valueChanged)
-        sizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        sizeSlider.addTarget(self, action: #selector(sizeSliderReleased), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+        sizeSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        if #available(iOS 26.0, *) {
+            // One tick per size: the thumb snaps to real steps, so every position changes the grid.
+            sizeSlider.trackConfiguration = .init(allowsTickValuesOnly: true, numberOfTicks: Self.gridLevels.count)
+        }
         let small = UIImageView(image: UIImage(systemName: "square.grid.3x3", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13)))
         let large = UIImageView(image: UIImage(systemName: "square.grid.2x2", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16)))
         for icon in [small, large] {
@@ -751,7 +766,12 @@ final class BrowserViewController: UIViewController {
     }
 
     @objc private func sizeSliderChanged() {
-        setGridLevel(Int(sizeSlider.value.rounded()))
+        setGridLevel(Int(sizeSlider.value.rounded()), fromSlider: true)
+    }
+
+    /// Settles the thumb on the step it is showing.
+    @objc private func sizeSliderReleased() {
+        sizeSlider.setValue(Float(gridLevel), animated: true)
     }
 
     // MARK: Menu
@@ -930,10 +950,9 @@ extension BrowserViewController {
                                 image: UIImage(systemName: isFavorite ? "heart.slash" : "heart")) { _ in
             FavoriteFoldersStore.shared.toggle(url)
         }
-        let share = UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self, weak sourceView] _ in
-            let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            activity.popoverPresentationController?.sourceView = sourceView
-            self?.present(activity, animated: true)
+        let share = UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+            guard let self else { return }
+            ShareSheet.present([url], from: self)
         }
         let copyName = UIAction(title: "Copy Name", image: UIImage(systemName: "doc.on.doc")) { _ in
             UIPasteboard.general.string = url.lastPathComponent
@@ -1184,9 +1203,7 @@ extension BrowserViewController: UIDocumentPickerDelegate {
     @objc private func shareSelection() {
         let urls = selectedURLsInOrder()
         guard !urls.isEmpty else { return }
-        let activity = UIActivityViewController(activityItems: urls, applicationActivities: nil)
-        activity.popoverPresentationController?.barButtonItem = shareSelectionButton
-        present(activity, animated: true)
+        ShareSheet.present(urls, preview: images.first { selectedURLs.contains($0.url) }, from: self)
     }
 
     /// Exactly two images: open them in the compare view (A = first in grid order).

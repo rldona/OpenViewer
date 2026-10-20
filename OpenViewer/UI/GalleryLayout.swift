@@ -30,6 +30,8 @@ final class GalleryLayout: UICollectionViewLayout {
     private(set) var headerFrames: [CGRect] = []
 
     let spacing: CGFloat = 3
+    /// Gap on the leading edge only, so images don't touch the sidebar; rows still run to the right edge.
+    var imageInset: CGFloat = 0 { didSet { if imageInset != oldValue { setNeedsRecompute() } } }
 
     private(set) var imageFrames: [CGRect] = []
     private var folderFrames: [CGRect] = []
@@ -87,7 +89,7 @@ final class GalleryLayout: UICollectionViewLayout {
     private func computeFolders(count: Int, width: CGFloat) -> CGFloat {
         folderFrames = []
         guard count > 0 else { return 0 }
-        let inset: CGFloat = 20, columnGap: CGFloat = 18, rowGap: CGFloat = 22
+        let inset: CGFloat = 16, columnGap: CGFloat = 18, rowGap: CGFloat = 22
         let columns = max(2, Int((width - inset * 2 + columnGap) / (240 + columnGap)))
         let itemWidth = ((width - inset * 2 - columnGap * CGFloat(columns - 1)) / CGFloat(columns)).rounded(.down)
         let textHeight: CGFloat = 52
@@ -103,10 +105,17 @@ final class GalleryLayout: UICollectionViewLayout {
     }
 
     private func layoutImages(_ range: Range<Int>, width: CGFloat, startY: CGFloat) -> CGFloat {
+        let first = imageFrames.count
+        let inner = max(width - imageInset, 1)
+        let y: CGFloat
         switch style {
-        case .justified: return computeJustified(range, width: width, startY: startY)
-        case .square: return computeSquare(range, width: width, startY: startY)
+        case .justified: y = computeJustified(range, width: inner, startY: startY)
+        case .square: y = computeSquare(range, width: inner, startY: startY)
         }
+        if imageInset > 0 {
+            for index in first..<imageFrames.count { imageFrames[index].origin.x += imageInset }
+        }
+        return y
     }
 
     private func computeJustified(_ range: Range<Int>, width: CGFloat, startY: CGFloat) -> CGFloat {

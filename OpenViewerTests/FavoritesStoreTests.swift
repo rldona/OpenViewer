@@ -59,6 +59,18 @@ final class FavoriteFoldersStoreTests: XCTestCase {
         reloaded.remove(reloaded.items[0].id)
         XCTAssertTrue(FavoriteFoldersStore(fileURL: file).items.isEmpty)
     }
+
+    func testReorderPersists() {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("folders-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let store = FavoriteFoldersStore(fileURL: file)
+        for name in ["A", "B", "C"] { store.set(URL(fileURLWithPath: "/tmp/\(name)", isDirectory: true), favorite: true) }
+        XCTAssertEqual(store.items.map(\.name), ["C", "B", "A"])
+        let ids = store.items.map(\.id)
+        store.reorder([ids[2], ids[0]])
+        XCTAssertEqual(store.items.map(\.name), ["A", "C", "B"])
+        XCTAssertEqual(FavoriteFoldersStore(fileURL: file).items.map(\.name), ["A", "C", "B"])
+    }
 }
 
 final class PathKeyTests: XCTestCase {
