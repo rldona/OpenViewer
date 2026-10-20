@@ -1,0 +1,67 @@
+name: OpenViewer
+options:
+  bundleIdPrefix: io.github.rldona
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "2"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+targets:
+  OpenViewer:
+    type: application
+    platform: iOS
+    sources:
+      - OpenViewer
+    info:
+      path: OpenViewer/Info.plist
+      properties:
+        CFBundleDisplayName: OpenViewer
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UIRequiresFullScreen: false
+        LSSupportsOpeningDocumentsInPlace: true
+        UIFileSharingEnabled: true
+        ITSAppUsesNonExemptEncryption: false
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.rldona.OpenViewer
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OPTIMIZATION_LEVEL_Release: -O
+  OpenViewerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - OpenViewerTests
+    dependencies:
+      - target: OpenViewer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.rldona.OpenViewerTests
+        GENERATE_INFOPLIST_FILE: true
+schemes:
+  OpenViewer:
+    build:
+      targets:
+        OpenViewer: all
+    test:
+      targets:
+        - OpenViewerTests
