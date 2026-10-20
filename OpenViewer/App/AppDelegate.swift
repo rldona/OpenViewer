@@ -29,6 +29,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let navigation = RootNavigationController(rootViewController: HomeViewController())
         navigation.navigationBar.prefersLargeTitles = true
         window.rootViewController = navigation
+        window.tintColor = Theme.accent
+        window.overrideUserInterfaceStyle = Appearance.current.style
         window.makeKeyAndVisible()
         self.window = window
     }

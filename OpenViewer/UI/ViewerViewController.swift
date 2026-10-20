@@ -8,8 +8,11 @@ final class ViewerViewController: UIViewController {
 
     private let pageController = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal,
                                                       options: [.interPageSpacing: 24])
-    private let topBar = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
-    private let bottomBar = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+    /// Holds the two top capsules; touches between them reach the image.
+    private let topBar = PassthroughView()
+    private let titleCapsule = GlassView()
+    private let actionsCapsule = GlassView()
+    private let bottomBar = GlassView()
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
     private let counterLabel = UILabel()
@@ -114,11 +117,17 @@ final class ViewerViewController: UIViewController {
         let titles = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
         titles.axis = .vertical
 
-        let topStack = UIStackView(arrangedSubviews: [closeButton, titles, favoriteButton, playButton, infoButton, shareButton])
-        topStack.alignment = .center
-        topStack.spacing = 8
-        topStack.translatesAutoresizingMaskIntoConstraints = false
-        topBar.contentView.addSubview(topStack)
+        let titleStack = UIStackView(arrangedSubviews: [closeButton, titles])
+        titleStack.alignment = .center
+        titleStack.spacing = 4
+        titleCapsule.embed(titleStack, insets: NSDirectionalEdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 20))
+        let actionsStack = UIStackView(arrangedSubviews: [favoriteButton, playButton, infoButton, shareButton])
+        actionsStack.alignment = .center
+        actionsStack.spacing = 2
+        actionsCapsule.embed(actionsStack, insets: NSDirectionalEdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
+        topBar.translatesAutoresizingMaskIntoConstraints = false
+        topBar.addSubview(titleCapsule)
+        topBar.addSubview(actionsCapsule)
 
         counterLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
         counterLabel.textColor = .white
@@ -126,14 +135,13 @@ final class ViewerViewController: UIViewController {
         counterLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         scrubber.minimumValue = 0
         scrubber.maximumValue = Float(max(items.count - 1, 1))
-        scrubber.minimumTrackTintColor = .white
+        scrubber.minimumTrackTintColor = Theme.accent
         scrubber.addTarget(self, action: #selector(scrubbed), for: .valueChanged)
         scrubber.accessibilityLabel = "Position"
         let bottomStack = UIStackView(arrangedSubviews: [scrubber, counterLabel])
         bottomStack.spacing = 16
         bottomStack.alignment = .center
-        bottomStack.translatesAutoresizingMaskIntoConstraints = false
-        bottomBar.contentView.addSubview(bottomStack)
+        bottomBar.embed(bottomStack, insets: NSDirectionalEdgeInsets(top: 10, leading: 22, bottom: 10, trailing: 22))
         bottomBar.isHidden = items.count < 2
 
         favoriteHUD.image = UIImage(systemName: "heart.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 72, weight: .medium))
@@ -165,27 +173,27 @@ final class ViewerViewController: UIViewController {
             toastLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -96),
         ])
 
-        for bar in [topBar, bottomBar] {
-            bar.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(bar)
-        }
+        view.addSubview(topBar)
+        view.addSubview(bottomBar)
         let guide = view.safeAreaLayoutGuide
+        let bottomWidth = bottomBar.widthAnchor.constraint(equalToConstant: 900)
+        bottomWidth.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            topBar.topAnchor.constraint(equalTo: view.topAnchor),
-            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            topStack.topAnchor.constraint(equalTo: guide.topAnchor, constant: 4),
-            topStack.bottomAnchor.constraint(equalTo: topBar.bottomAnchor, constant: -4),
-            topStack.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
-            topStack.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
+            topBar.topAnchor.constraint(equalTo: guide.topAnchor, constant: 14),
+            topBar.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            topBar.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            titleCapsule.topAnchor.constraint(equalTo: topBar.topAnchor),
+            titleCapsule.bottomAnchor.constraint(equalTo: topBar.bottomAnchor),
+            titleCapsule.leadingAnchor.constraint(equalTo: topBar.leadingAnchor),
+            titleCapsule.trailingAnchor.constraint(lessThanOrEqualTo: actionsCapsule.leadingAnchor, constant: -12),
+            actionsCapsule.centerYAnchor.constraint(equalTo: titleCapsule.centerYAnchor),
+            actionsCapsule.trailingAnchor.constraint(equalTo: topBar.trailingAnchor),
 
-            bottomBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            bottomStack.topAnchor.constraint(equalTo: bottomBar.topAnchor, constant: 10),
-            bottomStack.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -10),
-            bottomStack.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 24),
-            bottomStack.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -24),
+            bottomBar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            bottomBar.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -16),
+            bottomBar.leadingAnchor.constraint(greaterThanOrEqualTo: guide.leadingAnchor, constant: 24),
+            bottomBar.trailingAnchor.constraint(lessThanOrEqualTo: guide.trailingAnchor, constant: -24),
+            bottomWidth,
         ])
     }
 
@@ -429,5 +437,13 @@ final class PaddedLabel: UILabel {
     override var intrinsicContentSize: CGSize {
         let size = super.intrinsicContentSize
         return CGSize(width: size.width + insets.left + insets.right, height: size.height + insets.top + insets.bottom)
+    }
+}
+
+/// A container that lets touches through except where it has visible subviews.
+final class PassthroughView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
     }
 }

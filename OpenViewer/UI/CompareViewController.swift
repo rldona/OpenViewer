@@ -37,8 +37,8 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
     private var isSyncing = false
 
     // Controls.
-    private let topBar = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
-    private let bottomBar = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+    private let topBar = GlassView()
+    private let bottomBar = GlassView()
     private let modeControl = UISegmentedControl(items: Mode.allCases.map(\.title))
     private let opacitySlider = UISlider()
     private let firstLabel = UILabel()
@@ -175,7 +175,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         opacitySlider.minimumValue = 0
         opacitySlider.maximumValue = 1
         opacitySlider.value = 0.5
-        opacitySlider.minimumTrackTintColor = .white
+        opacitySlider.minimumTrackTintColor = Theme.accent
         opacitySlider.accessibilityLabel = "Opacity of B"
         opacitySlider.addTarget(self, action: #selector(opacityChanged), for: .valueChanged)
         opacitySlider.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
@@ -187,31 +187,29 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         firstLabel.widthAnchor.constraint(equalTo: secondLabel.widthAnchor).isActive = true
         bottomBar.contentView.addSubview(bottomStack)
 
-        for bar in [topBar, bottomBar] {
-            bar.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(bar)
-        }
+        view.addSubview(topBar)
+        view.addSubview(bottomBar)
         let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            topBar.topAnchor.constraint(equalTo: view.topAnchor),
-            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            topStack.topAnchor.constraint(equalTo: guide.topAnchor, constant: 6),
-            topStack.bottomAnchor.constraint(equalTo: topBar.bottomAnchor, constant: -8),
-            topStack.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
-            topStack.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            topBar.topAnchor.constraint(equalTo: guide.topAnchor, constant: 14),
+            topBar.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            topBar.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            topStack.topAnchor.constraint(equalTo: topBar.contentView.topAnchor, constant: 4),
+            topStack.bottomAnchor.constraint(equalTo: topBar.contentView.bottomAnchor, constant: -4),
+            topStack.leadingAnchor.constraint(equalTo: topBar.contentView.leadingAnchor, constant: 8),
+            topStack.trailingAnchor.constraint(equalTo: topBar.contentView.trailingAnchor, constant: -8),
             close.widthAnchor.constraint(equalToConstant: 44),
             close.heightAnchor.constraint(equalToConstant: 44),
             swap.widthAnchor.constraint(equalToConstant: 44),
             swap.heightAnchor.constraint(equalToConstant: 44),
 
-            bottomBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            bottomStack.topAnchor.constraint(equalTo: bottomBar.topAnchor, constant: 10),
-            bottomStack.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -10),
-            bottomStack.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 20),
-            bottomStack.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -20),
+            bottomBar.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -16),
+            bottomBar.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            bottomBar.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            bottomStack.topAnchor.constraint(equalTo: bottomBar.contentView.topAnchor, constant: 10),
+            bottomStack.bottomAnchor.constraint(equalTo: bottomBar.contentView.bottomAnchor, constant: -10),
+            bottomStack.leadingAnchor.constraint(equalTo: bottomBar.contentView.leadingAnchor, constant: 22),
+            bottomStack.trailingAnchor.constraint(equalTo: bottomBar.contentView.trailingAnchor, constant: -22),
         ])
     }
 

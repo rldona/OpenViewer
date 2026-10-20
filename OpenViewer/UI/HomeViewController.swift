@@ -21,9 +21,12 @@ final class HomeViewController: UIViewController {
         super.viewDidLoad()
         title = "OpenViewer"
         view.backgroundColor = .systemGroupedBackground
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
+        let openButton = UIBarButtonItem(
             image: UIImage(systemName: "folder.badge.plus"), style: .plain, target: self, action: #selector(pickFolder))
-        navigationItem.rightBarButtonItem?.accessibilityLabel = "Open Folder"
+        openButton.accessibilityLabel = "Open Folder"
+        let settingsButton = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeSettingsMenu())
+        settingsButton.accessibilityLabel = "Settings"
+        navigationItem.rightBarButtonItems = [settingsButton, openButton]
 
         var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
         config.headerMode = .supplementary
@@ -122,6 +125,19 @@ final class HomeViewController: UIViewController {
                 open(last, animated: false)
             }
         }
+    }
+
+    private func makeSettingsMenu() -> UIMenu {
+        let current = Appearance.current
+        let appearance = Appearance.allCases.map { option in
+            UIAction(title: option.title, state: option == current ? .on : .off) { [weak self] _ in
+                Appearance.current = option
+                self?.navigationItem.rightBarButtonItems?.first?.menu = self?.makeSettingsMenu()
+            }
+        }
+        return UIMenu(children: [
+            UIMenu(title: "Appearance", subtitle: current.title, image: UIImage(systemName: "circle.lefthalf.filled"), children: appearance),
+        ])
     }
 
     override var keyCommands: [UIKeyCommand]? {

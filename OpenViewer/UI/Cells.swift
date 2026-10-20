@@ -11,7 +11,7 @@ final class ThumbnailCell: UICollectionViewCell {
     private let checkmark = UIImageView(image: UIImage(
         systemName: "checkmark.circle.fill",
         withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
-            .applying(UIImage.SymbolConfiguration(paletteColors: [.white, .systemBlue]))))
+            .applying(UIImage.SymbolConfiguration(paletteColors: [Theme.onAccent, Theme.accent]))))
     private var token: LoadToken?
     private var representedURL: URL?
 

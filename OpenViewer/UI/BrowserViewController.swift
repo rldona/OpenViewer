@@ -56,6 +56,11 @@ final class BrowserViewController: UIViewController {
     private var menuButton: UIBarButtonItem!
     private var normalRightItems: [UIBarButtonItem] = []
     private var slideshowButton: UIBarButtonItem!
+    /// Floating glass bar: scope (folders / whole tree / favourites) and thumbnail size.
+    private let scopeBar = GlassView()
+    private let scopeControl = UISegmentedControl(items: ["Folders", "All Images", "Favorites"])
+    private let sizeSlider = UISlider()
+    private let sizeControls = UIStackView()
     private var selectButton: UIBarButtonItem!
 
     // Selection mode
@@ -107,7 +112,7 @@ final class BrowserViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = Theme.background
         navigationItem.largeTitleDisplayMode = .never
         titleView.titleLabel.text = displayName
         navigationItem.titleView = titleView
@@ -115,7 +120,7 @@ final class BrowserViewController: UIViewController {
 
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: layout)
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        collectionView.backgroundColor = .systemBackground
+        collectionView.backgroundColor = Theme.background
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.prefetchDataSource = self
@@ -159,6 +164,7 @@ final class BrowserViewController: UIViewController {
         collectionView.addGestureRecognizer(selectionLongPress)
         collectionView.addGestureRecognizer(selectionPan)
         setupSelectionToolbar()
+        setupScopeBar()
 
         NotificationCenter.default.addObserver(self, selector: #selector(favoritesChanged(_:)),
                                                name: FavoritesStore.didChange, object: nil)
@@ -601,6 +607,81 @@ final class BrowserViewController: UIViewController {
     @objc private func focusSearch() { navigationItem.searchController?.searchBar.becomeFirstResponder() }
     @objc private func goBack() { navigationController?.popViewController(animated: true) }
 
+    // MARK: Scope bar
+
+    private func setupScopeBar() {
+        scopeControl.addTarget(self, action: #selector(scopeChanged), for: .valueChanged)
+        scopeControl.accessibilityLabel = "Show"
+
+        sizeSlider.minimumValue = 0
+        sizeSlider.maximumValue = Float(Self.gridLevels.count - 1)
+        sizeSlider.value = Float(gridLevel)
+        sizeSlider.accessibilityLabel = "Thumbnail size"
+        sizeSlider.addTarget(self, action: #selector(sizeSliderChanged), for: .valueChanged)
+        sizeSlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        let small = UIImageView(image: UIImage(systemName: "square.grid.3x3", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13)))
+        let large = UIImageView(image: UIImage(systemName: "square.grid.2x2", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16)))
+        for icon in [small, large] {
+            icon.tintColor = .secondaryLabel
+            icon.setContentHuggingPriority(.required, for: .horizontal)
+        }
+        sizeControls.addArrangedSubview(small)
+        sizeControls.addArrangedSubview(sizeSlider)
+        sizeControls.addArrangedSubview(large)
+        sizeControls.spacing = 8
+        sizeControls.alignment = .center
+
+        let stack = UIStackView(arrangedSubviews: [scopeControl, sizeControls])
+        stack.spacing = 16
+        stack.alignment = .center
+        scopeBar.embed(stack, insets: NSDirectionalEdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 18))
+        view.addSubview(scopeBar)
+        NSLayoutConstraint.activate([
+            scopeBar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            scopeBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            scopeBar.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
+            scopeBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 52),
+        ])
+        // Let the last rows scroll clear of the floating bar.
+        collectionView.contentInset.bottom = 92
+        collectionView.verticalScrollIndicatorInsets.bottom = 92
+    }
+
+    private func updateScopeBar(imageContext: Bool) {
+        scopeControl.isHidden = isFavoritesView
+        scopeControl.selectedSegmentIndex = favoritesOnly ? 2 : includeSubfolders ? 1 : 0
+        sizeControls.isHidden = !imageContext
+        if !sizeSlider.isTracking { sizeSlider.value = Float(gridLevel) }
+        scopeBar.isHidden = isSelecting || (isFavoritesView && !imageContext)
+    }
+
+    @objc private func scopeChanged() {
+        switch scopeControl.selectedSegmentIndex {
+        case 0: setScope(subfolders: false, favorites: false)
+        case 1: setScope(subfolders: true, favorites: false)
+        default: setScope(subfolders: true, favorites: true)
+        }
+    }
+
+    /// Favourites look through the whole tree, so they turn on subfolders too.
+    private func setScope(subfolders: Bool, favorites: Bool) {
+        favoritesOnly = favorites
+        if subfolders != includeSubfolders {
+            includeSubfolders = subfolders
+            Settings.includeSubfolders = subfolders
+            setContent(folders: [], images: [])
+            collectionView.setContentOffset(CGPoint(x: 0, y: -collectionView.adjustedContentInset.top), animated: false)
+            reload()
+        } else {
+            applyFilter()
+        }
+        menuButton.menu = makeMenu()
+    }
+
+    @objc private func sizeSliderChanged() {
+        setGridLevel(Int(sizeSlider.value.rounded()))
+    }
+
     // MARK: Menu
 
     private func makeMenu() -> UIMenu {
@@ -622,19 +703,10 @@ final class BrowserViewController: UIViewController {
                 self?.resort()
             }
         }
-        let recursive = UIAction(title: "Include Subfolders", subtitle: "Show every image in this folder tree",
-                                 image: UIImage(systemName: "square.stack.3d.down.right"),
-                                 state: includeSubfolders ? .on : .off) { [weak self] _ in
-            self?.toggleSubfolders()
-        }
         let larger = UIAction(title: "Larger Thumbnails", image: UIImage(systemName: "plus.magnifyingglass"),
                               attributes: gridLevel == Self.gridLevels.count - 1 ? .disabled : []) { [weak self] _ in self?.zoomIn() }
         let smaller = UIAction(title: "Smaller Thumbnails", image: UIImage(systemName: "minus.magnifyingglass"),
                                attributes: gridLevel == 0 ? .disabled : []) { [weak self] _ in self?.zoomOut() }
-        let favoritesOnlyAction = UIAction(title: "Favorites Only", image: UIImage(systemName: "heart"),
-                                           state: favoritesOnly ? .on : .off) { [weak self] _ in
-            self?.toggleFavoritesOnly()
-        }
         let styleActions = [
             UIAction(title: "Original Proportions", image: UIImage(systemName: "rectangle.3.group"),
                      state: layout.style == .justified ? .on : .off) { [weak self] _ in self?.setGridStyle(.justified) },
@@ -668,7 +740,7 @@ final class BrowserViewController: UIViewController {
         }
         var sections: [UIMenuElement] = []
         if !isFavoritesView {
-            var viewOptions: [UIMenuElement] = [recursive]
+            var viewOptions: [UIMenuElement] = []
             // Only meaningful while folders are listed.
             if !includeSubfolders && (!allFolders.isEmpty || hideEmptyFolders) {
                 viewOptions.append(UIAction(title: "Hide Empty Folders", subtitle: "Folders without any images inside",
@@ -677,7 +749,6 @@ final class BrowserViewController: UIViewController {
                     self?.toggleHideEmptyFolders()
                 })
             }
-            if imageContext { viewOptions.append(favoritesOnlyAction) }
             sections.append(UIMenu(options: .displayInline, children: viewOptions))
         }
         sections.append(UIMenu(title: "Sort By", image: UIImage(systemName: "arrow.up.arrow.down"), children: [
@@ -708,6 +779,7 @@ final class BrowserViewController: UIViewController {
     /// Adapts the toolbar buttons, the menu and the search prompt to what the folder contains.
     private func updateContextualControls() {
         let imageContext = showsImageControls
+        updateScopeBar(imageContext: imageContext)
         let items: [UIBarButtonItem] = imageContext ? [menuButton, slideshowButton, selectButton] : [menuButton]
         if items.map(ObjectIdentifier.init) != normalRightItems.map(ObjectIdentifier.init) {
             normalRightItems = items
@@ -845,6 +917,7 @@ extension BrowserViewController: UIDocumentPickerDelegate {
             UIBarButtonItem(title: "Select All", primaryAction: UIAction { [weak self] _ in self?.toggleSelectAll() }),
         ]
         navigationController?.setToolbarHidden(false, animated: true)
+        scopeBar.isHidden = true
         updateSelectionUI()
     }
 
