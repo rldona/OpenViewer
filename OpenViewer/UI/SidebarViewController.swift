@@ -5,11 +5,14 @@ import UniformTypeIdentifiers
 /// In a compact window the same list is the root screen and pushes folders onto its own stack.
 final class SidebarViewController: UIViewController {
     private enum Section: String, CaseIterable {
-        case library, pinned, recent
+        case library, pinned, smartAlbums, boards, tags, recent
 
         var title: String {
             switch self {
+            case .boards: return "Boards"
             case .library: return "Library"
+            case .smartAlbums: return "Smart Albums"
+            case .tags: return "Tags"
             case .pinned: return "Pinned Folders"
             case .recent: return "Recent"
             }
@@ -23,6 +26,9 @@ final class SidebarViewController: UIViewController {
         case favorites(Int)
         case appDocuments
         case favoriteFolder(FavoriteFolder)
+        case smartAlbum(SmartAlbum)
+        case board(UUID, String, Int)
+        case tag(TagColor, Int)
         case recent(Bookmark)
     }
 
@@ -41,7 +47,19 @@ final class SidebarViewController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    deinit { ScopedAccess.endAll(owner: self) }
+
     private var showsSelection: Bool { detailNavigation != nil }
+
+    /// Opens a folder directly (e.g. in a window opened with "Open in New Window").
+    func openFolder(_ url: URL) {
+        ScopedAccess.begin(url, owner: self)
+        if let bookmark = BookmarkStore.shared.items.first(where: { BookmarkStore.shared.resolve($0)?.standardizedFileURL == url.standardizedFileURL }) {
+            open(.recent(bookmark), animated: false)
+        } else {
+            show(BrowserViewController(folderURL: url), row: .pickFolder, root: url, accessAll: true, animated: false)
+        }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -97,6 +115,20 @@ final class SidebarViewController: UIViewController {
             case .recent(let bookmark):
                 content.text = bookmark.name
                 content.image = UIImage(systemName: "folder.fill")
+            case .smartAlbum(let album):
+                content.text = album.name
+                content.image = UIImage(systemName: "gearshape.2.fill")
+                content.imageProperties.tintColor = Theme.accent
+            case .board(_, let name, let count):
+                content.text = name
+                content.secondaryText = count.formatted()
+                content.image = UIImage(systemName: "rectangle.on.rectangle.angled")
+                content.imageProperties.tintColor = Theme.accent
+            case .tag(let tag, let count):
+                content.text = tag.title
+                content.secondaryText = count.formatted()
+                content.image = UIImage(systemName: "circle.fill")
+                content.imageProperties.tintColor = tag.color
             case .header:
                 break
             }
@@ -105,7 +137,7 @@ final class SidebarViewController: UIViewController {
             cell.contentConfiguration = content
             // In edit mode (like Photos): pinned folders get a grip to drag; both lists can remove rows.
             switch row {
-            case .favoriteFolder:
+            case .favoriteFolder, .smartAlbum, .board:
                 cell.accessories = [.delete(displayed: .whenEditing), .reorder(displayed: .whenEditing)]
             case .recent:
                 cell.accessories = [.delete(displayed: .whenEditing)]
@@ -132,25 +164,39 @@ final class SidebarViewController: UIViewController {
             if case .header(let section) = row { Self.setCollapsed(section, false) }
         }
         dataSource.reorderingHandlers.canReorderItem = { row in
-            if case .favoriteFolder = row { return true }
-            return false
+            switch row {
+            case .favoriteFolder, .smartAlbum, .board: return true
+            default: return false
+            }
         }
         dataSource.reorderingHandlers.didReorder = { transaction in
-            let ids = transaction.finalSnapshot.itemIdentifiers.compactMap { row -> UUID? in
+            let rows = transaction.finalSnapshot.itemIdentifiers
+            FavoriteFoldersStore.shared.reorder(rows.compactMap { row -> UUID? in
                 if case .favoriteFolder(let folder) = row { return folder.id }
                 return nil
-            }
-            FavoriteFoldersStore.shared.reorder(ids)
+            })
+            SmartAlbumStore.shared.reorder(rows.compactMap { row -> UUID? in
+                if case .smartAlbum(let album) = row { return album.id }
+                return nil
+            })
+            BoardStore.shared.reorder(rows.compactMap { row -> UUID? in
+                if case .board(let id, _, _) = row { return id }
+                return nil
+            })
         }
         NotificationCenter.default.addObserver(self, selector: #selector(libraryChanged),
                                                name: FavoritesStore.didChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(libraryChanged),
+                                               name: TagStore.didChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(libraryChanged),
+                                               name: BoardStore.didChange, object: nil)
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         if !showsSelection {
             // Compact root: back here means nothing is being browsed any more.
-            ScopedAccess.endAll()
+            ScopedAccess.endAll(owner: self)
         }
         reload()
     }
@@ -188,6 +234,9 @@ final class SidebarViewController: UIViewController {
         let contents: [(Section, [Row])] = [
             (.library, [.favorites(FavoritesStore.shared.count), .appDocuments]),
             (.pinned, FavoriteFoldersStore.shared.items.map(Row.favoriteFolder)),
+            (.smartAlbums, SmartAlbumStore.shared.items.map(Row.smartAlbum)),
+            (.boards, BoardStore.shared.boards.map { Row.board($0.id, $0.name, $0.items.count) }),
+            (.tags, TagStore.shared.counts.map { Row.tag($0.tag, $0.count) }),
             (.recent, BookmarkStore.shared.items.map(Row.recent)),
         ].filter { !$0.1.isEmpty }
 
@@ -224,6 +273,9 @@ final class SidebarViewController: UIViewController {
             case (.favorites, .favorites), (.appDocuments, .appDocuments): return true
             case let (.favoriteFolder(a), .favoriteFolder(b)): return a.id == b.id
             case let (.recent(a), .recent(b)): return a.id == b.id
+            case let (.smartAlbum(a), .smartAlbum(b)): return a.id == b.id
+            case let (.board(a, _, _), .board(b, _, _)): return a == b
+            case let (.tag(a, _), .tag(b, _)): return a == b
             default: return false
             }
         }
@@ -247,6 +299,18 @@ final class SidebarViewController: UIViewController {
                 self?.reload()
                 done(true)
             }
+        case .smartAlbum(let album):
+            action = UIContextualAction(style: .destructive, title: "Delete") { [weak self] _, _, done in
+                SmartAlbumStore.shared.remove(album.id)
+                self?.reload()
+                done(true)
+            }
+        case .board(let id, _, _):
+            action = UIContextualAction(style: .destructive, title: "Delete") { [weak self] _, _, done in
+                BoardStore.shared.remove(id)
+                self?.reload()
+                done(true)
+            }
         default:
             return nil
         }
@@ -264,10 +328,20 @@ final class SidebarViewController: UIViewController {
         let edit = UIAction(title: "Edit Sidebar", image: UIImage(systemName: "list.bullet")) { [weak self] _ in
             self?.setEditing(true, animated: true)
         }
+        let newBoard = UIAction(title: "New Board", image: UIImage(systemName: "rectangle.on.rectangle.angled")) { [weak self] _ in
+            self?.promptNewBoard()
+        }
         return UIMenu(children: [
+            newBoard,
             edit,
             UIMenu(title: "Appearance", subtitle: current.title, image: UIImage(systemName: "circle.lefthalf.filled"), children: appearance),
         ])
+    }
+
+    private func promptNewBoard() {
+        BoardPrompt.create(from: self) { [weak self] board in
+            self?.open(.board(board.id, board.name, 0))
+        }
     }
 
     // MARK: Opening
@@ -293,14 +367,31 @@ final class SidebarViewController: UIViewController {
         case .favoriteFolder(let folder):
             let url = FavoriteFoldersStore.shared.resolve(folder)
             var isDirectory: ObjCBool = false
-            ScopedAccess.endAll()
+            ScopedAccess.endAll(owner: self)
             beginAccessToRememberedFolders()
-            ScopedAccess.begin(url)
+            ScopedAccess.begin(url, owner: self)
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
                 showUnavailable(folder.name)
                 return
             }
             show(BrowserViewController(folderURL: url, displayName: folder.name), row: row, root: url, accessAll: true, animated: animated)
+        case .smartAlbum(let album):
+            let url = SmartAlbumStore.shared.resolve(album)
+            ScopedAccess.endAll(owner: self)
+            beginAccessToRememberedFolders()
+            ScopedAccess.begin(url, owner: self)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                showUnavailable(album.name)
+                return
+            }
+            show(BrowserViewController(folderURL: url, smartAlbum: album), row: row, root: url, accessAll: true, animated: animated)
+        case .board(let id, _, _):
+            guard let board = BoardStore.shared.board(id) else { return }
+            show(BoardViewController(board: board), row: row, accessAll: true, animated: animated)
+        case .tag(let tag, _):
+            let collection = ImageCollection(title: "\(tag.title) Tag", images: [], source: { TagStore.shared.urls(for: tag) })
+            show(BrowserViewController(collection: collection), row: row, accessAll: true, animated: animated)
         case .recent(let bookmark):
             guard let url = BookmarkStore.shared.resolve(bookmark) else {
                 showUnavailable(bookmark.name)
@@ -312,26 +403,26 @@ final class SidebarViewController: UIViewController {
     }
 
     /// Replaces the detail column (regular width) or pushes (compact) the given browser.
-    private func show(_ browser: BrowserViewController, row: Row, root: URL? = nil,
+    private func show(_ browser: UIViewController, row: Row, root: URL? = nil,
                       accessAll: Bool = false, animated: Bool) {
         if let detailNavigation {
-            ScopedAccess.endAll()
+            ScopedAccess.endAll(owner: self)
             if accessAll { beginAccessToRememberedFolders() }
-            if let root { ScopedAccess.begin(root) }
+            if let root { ScopedAccess.begin(root, owner: self) }
             selectedRow = row
             detailNavigation.setViewControllers([browser], animated: false)
             splitViewController?.show(.secondary)
             reload()
         } else {
             if accessAll { beginAccessToRememberedFolders() }
-            if let root { ScopedAccess.begin(root) }
+            if let root { ScopedAccess.begin(root, owner: self) }
             navigationController?.pushViewController(browser, animated: animated)
         }
     }
 
     private func beginAccessToRememberedFolders() {
         for bookmark in BookmarkStore.shared.items {
-            if let url = BookmarkStore.shared.resolve(bookmark) { ScopedAccess.begin(url) }
+            if let url = BookmarkStore.shared.resolve(bookmark) { ScopedAccess.begin(url, owner: self) }
         }
     }
 
@@ -346,6 +437,24 @@ final class SidebarViewController: UIViewController {
 }
 
 extension SidebarViewController: UICollectionViewDelegate {
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
+                        point: CGPoint) -> UIContextMenuConfiguration? {
+        guard let indexPath = indexPaths.first, let row = dataSource.itemIdentifier(for: indexPath) else { return nil }
+        let url: URL?
+        switch row {
+        case .favoriteFolder(let folder): url = FavoriteFoldersStore.shared.resolve(folder)
+        case .smartAlbum(let album): url = SmartAlbumStore.shared.resolve(album)
+        case .recent(let bookmark): url = BookmarkStore.shared.resolve(bookmark)
+        default: url = nil
+        }
+        guard let url, UIApplication.shared.supportsMultipleScenes else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+            UIMenu(children: [UIAction(title: "Open in New Window", image: UIImage(systemName: "macwindow.badge.plus")) { _ in
+                WindowOpener.open(url)
+            }])
+        }
+    }
+
     func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
         if case .header = dataSource.itemIdentifier(for: indexPath) { return false }
         return true
@@ -377,7 +486,7 @@ extension SidebarViewController: UIDocumentPickerDelegate {
         if let bookmark = BookmarkStore.shared.add(url) {
             open(.recent(bookmark))
         } else {
-            ScopedAccess.begin(url)
+            ScopedAccess.begin(url, owner: self)
             show(BrowserViewController(folderURL: url), row: .pickFolder, root: url, animated: true)
         }
     }

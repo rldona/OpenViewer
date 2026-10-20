@@ -14,6 +14,8 @@ final class ThumbnailCell: UICollectionViewCell {
             .applying(UIImage.SymbolConfiguration(paletteColors: [Theme.onAccent, Theme.accent]))))
     private var token: LoadToken?
     private var representedURL: URL?
+    /// One small dot per colour tag.
+    private let tagDots = UIStackView()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -45,7 +47,13 @@ final class ThumbnailCell: UICollectionViewCell {
         checkmark.layer.shadowOffset = .zero
         checkmark.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(checkmark)
+        tagDots.spacing = -3
+        tagDots.isUserInteractionEnabled = false
+        tagDots.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(tagDots)
         NSLayoutConstraint.activate([
+            tagDots.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+            tagDots.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
             favoriteBadge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
             favoriteBadge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
             checkmark.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
@@ -117,7 +125,26 @@ final class ThumbnailCell: UICollectionViewCell {
     func updateFavorite() {
         let isFavorite = representedURL.map(FavoritesStore.shared.contains) ?? false
         favoriteBadge.isHidden = !isFavorite
-        accessibilityValue = isFavorite ? "Favorite" : nil
+        let tags = representedURL.map(TagStore.shared.tags(for:)) ?? []
+        updateTagDots(tags)
+        accessibilityValue = ([isFavorite ? "Favorite" : nil] + tags.map { "\($0.title) tag" }).compactMap { $0 }.joined(separator: ", ")
+    }
+
+    private func updateTagDots(_ tags: [TagColor]) {
+        guard tagDots.arrangedSubviews.count != tags.count
+                || zip(tagDots.arrangedSubviews, tags).contains(where: { $0.backgroundColor != $1.color }) else { return }
+        tagDots.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for tag in tags {
+            let dot = UIView()
+            dot.backgroundColor = tag.color
+            dot.layer.cornerRadius = 6
+            dot.layer.borderWidth = 1.5
+            dot.layer.borderColor = UIColor(white: 0, alpha: 0.35).cgColor
+            dot.translatesAutoresizingMaskIntoConstraints = false
+            dot.widthAnchor.constraint(equalToConstant: 12).isActive = true
+            dot.heightAnchor.constraint(equalToConstant: 12).isActive = true
+            tagDots.addArrangedSubview(dot)
+        }
     }
 
     private func setImage(_ image: UIImage?) {
@@ -125,6 +152,10 @@ final class ThumbnailCell: UICollectionViewCell {
             imageView.contentMode = .scaleAspectFill
             imageView.tintColor = nil
             imageView.image = image
+            // Tiny images (pixel art, sprites) blown up to cell size stay crisp instead of blurry.
+            let cellPixels = max(bounds.width, bounds.height) * traitCollection.displayScale
+            let imagePixels = max(image.size.width, image.size.height) * image.scale
+            imageView.layer.magnificationFilter = imagePixels > 0 && cellPixels / imagePixels >= 2 ? .nearest : .linear
         } else {
             imageView.contentMode = .center
             imageView.tintColor = .tertiaryLabel

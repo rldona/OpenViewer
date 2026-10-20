@@ -73,3 +73,14 @@ extension Array where Element: Listable {
         return order.ascending ? ascending : ascending.reversed()
     }
 }
+
+/// A fixed set of images from anywhere, optionally split into titled groups (duplicates, similar images…).
+struct ImageCollection {
+    let title: String
+    let images: [ImageItem]
+    /// Group id per image; images of a group are expected to be consecutive.
+    var groupOf: [URL: Int] = [:]
+    var groupTitles: [Int: String] = [:]
+    /// For live collections (e.g. a tag): re-read on every reload instead of using `images`.
+    var source: (() -> [URL])?
+}

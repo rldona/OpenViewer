@@ -26,6 +26,8 @@ final class ViewerViewController: UIViewController {
     private let infoButton = UIButton(type: .system)
     private let shareButton = UIButton(type: .system)
     private let favoriteButton = UIButton(type: .system)
+    private let animateButton = UIButton(type: .system)
+    private let moreButton = UIButton(type: .system)
     private let favoriteHUD = UIImageView()
     private let toastLabel = PaddedLabel()
 
@@ -71,6 +73,7 @@ final class ViewerViewController: UIViewController {
         if infoVisible { applyInfoVisibility(animated: false) }
         topBar.alpha = 0
         bottomBar.alpha = 0
+        infoPanel.alpha = 0
         if !items.isEmpty {
             pageController.setViewControllers([makePage(currentIndex)], direction: .forward, animated: false)
         }
@@ -80,6 +83,7 @@ final class ViewerViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         becomeFirstResponder()
+        if ExternalDisplay.shared.isConnected { showToast("Showing on the external display") }
         if startSlideshowOnAppear {
             startSlideshowOnAppear = false
             startSlideshow()
@@ -89,6 +93,8 @@ final class ViewerViewController: UIViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         stopSlideshow()
+        // Back to the idle screen unless another viewer (e.g. from a board) takes over.
+        if isBeingDismissed || presentingViewController == nil { ExternalDisplay.shared.show(nil) }
     }
 
     override var canBecomeFirstResponder: Bool { true }
@@ -112,6 +118,16 @@ final class ViewerViewController: UIViewController {
         configure(infoButton, symbol: "info.circle", label: "Info", action: #selector(showInfo))
         configure(shareButton, symbol: "square.and.arrow.up", label: "Share", action: #selector(share))
         configure(favoriteButton, symbol: "heart", label: "Favorite", action: #selector(toggleFavorite))
+        configure(animateButton, symbol: "film.stack", label: "Play Frames as Animation", action: #selector(playFrames))
+        moreButton.setImage(UIImage(systemName: "ellipsis.circle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)), for: .normal)
+        moreButton.tintColor = .white
+        moreButton.accessibilityLabel = "More"
+        moreButton.showsMenuAsPrimaryAction = true
+        moreButton.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] provide in
+            provide(self?.moreMenuElements() ?? [])
+        }])
+        moreButton.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        moreButton.heightAnchor.constraint(equalToConstant: 44).isActive = true
         playButton.menu = slideshowMenu()
 
         titleLabel.font = .preferredFont(forTextStyle: .headline)
@@ -127,7 +143,11 @@ final class ViewerViewController: UIViewController {
         titleStack.alignment = .center
         titleStack.spacing = 4
         titleCapsule.embed(titleStack, insets: NSDirectionalEdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 20))
-        let actionsStack = UIStackView(arrangedSubviews: [favoriteButton, playButton, infoButton, shareButton])
+        // Drag the title to drop the image file into another app or window.
+        let drag = UIDragInteraction(delegate: self)
+        drag.isEnabled = true
+        titleCapsule.addInteraction(drag)
+        let actionsStack = UIStackView(arrangedSubviews: [favoriteButton, animateButton, playButton, infoButton, shareButton, moreButton])
         actionsStack.alignment = .center
         actionsStack.spacing = 2
         actionsCapsule.embed(actionsStack, insets: NSDirectionalEdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
@@ -160,6 +180,7 @@ final class ViewerViewController: UIViewController {
         bottomBar.layer.cornerRadius = 22
 
         infoPanel.translatesAutoresizingMaskIntoConstraints = false
+        infoPanel.onMessage = { [weak self] text in self?.showToast(text) }
         infoPanel.isHidden = true
 
         favoriteHUD.image = UIImage(systemName: "heart.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 72, weight: .medium))
@@ -248,6 +269,7 @@ final class ViewerViewController: UIViewController {
 
     private func makePage(_ index: Int) -> ZoomPageViewController {
         let page = ZoomPageViewController(item: items[index], index: index)
+        page.onMessage = { [weak self] text in self?.showToast(text) }
         page.onSingleTap = { [weak self] in
             self?.stopSlideshow()
             self?.toggleChrome()
@@ -275,6 +297,9 @@ final class ViewerViewController: UIViewController {
         filmstrip.select(currentIndex, animated: true)
         if infoVisible { infoPanel.show(item) }
         updateFavoriteButton()
+        ExternalDisplay.shared.show(item)
+        // Only numbered names ("walk_03.png") can be part of a frame sequence.
+        animateButton.isHidden = FrameSequence.stem(of: item.name) == nil
         preloadNeighbours()
     }
 
@@ -399,10 +424,65 @@ final class ViewerViewController: UIViewController {
         infoButton.accessibilityTraits = infoVisible ? [.button, .selected] : .button
         if infoVisible {
             infoPanel.show(items[currentIndex])
-            setChromeHidden(false)
+            // Turning it on reveals the controls; opening the viewer keeps them (and the card) hidden.
+            if animated { setChromeHidden(false) }
         }
         let changes = { self.infoPanel.isHidden = !self.infoVisible }
         animated ? UIView.transition(with: infoPanel, duration: 0.2, options: .transitionCrossDissolve, animations: changes) : changes()
+    }
+
+    // MARK: More menu
+
+    private func moreMenuElements() -> [UIMenuElement] {
+        guard !items.isEmpty else { return [] }
+        let item = items[currentIndex]
+        let similar = UIAction(title: "Find Similar Images", image: UIImage(systemName: "sparkle.magnifyingglass")) { [weak self] _ in
+            self?.findSimilar()
+        }
+        let copyName = UIAction(title: "Copy Name", image: UIImage(systemName: "doc.on.doc")) { _ in
+            UIPasteboard.general.string = item.name
+        }
+        let store = TagStore.shared
+        let tags = UIMenu(title: "Tags", image: UIImage(systemName: "tag"), children: TagColor.allCases.map { tag in
+            let has = store.has(tag, item.url)
+            return UIAction(title: tag.title, image: tag.dot, state: has ? .on : .off) { [weak self] _ in
+                store.set(tag, on: [item.url], !has)
+                self?.showToast(has ? "Removed \(tag.title) tag" : "Tagged \(tag.title)")
+            }
+        })
+        let board = BoardPrompt.menu(from: self, urls: { [item.url] }) { [weak self] board in
+            self?.showToast("Added to \(board.name)")
+        }
+        return [tags, board, similar, copyName]
+    }
+
+    /// Images among this viewer's list that look like the current one.
+    @objc private func findSimilar() {
+        guard !items.isEmpty else { return }
+        stopSlideshow()
+        let item = items[currentIndex]
+        let items = self.items
+        runAnalysis(.visual, on: items, title: "Finding Similar Images") { [weak self] in
+            guard let self else { return }
+            if let collection = AnalysisFlows.similar(to: item, in: items) {
+                self.presentCollection(collection)
+            } else {
+                self.showToast("Nothing similar found")
+            }
+        }
+    }
+
+    /// Plays the numbered frames this image belongs to as an animation.
+    @objc private func playFrames() {
+        guard !items.isEmpty else { return }
+        stopSlideshow()
+        let item = items[currentIndex]
+        let frames = FrameSequence.frames(around: item, in: items)
+        guard frames.count > 1 else {
+            showToast("No numbered frames next to this image")
+            return
+        }
+        present(FlipbookViewController(frames: frames, startAt: frames.firstIndex(of: item) ?? 0), animated: true)
     }
 
     @objc private func share() {
@@ -427,6 +507,7 @@ final class ViewerViewController: UIViewController {
             UIKeyCommand(title: "Transparency Background", action: #selector(cycleTransparencyBackground), input: "b"),
             UIKeyCommand(title: "Slideshow", action: #selector(toggleSlideshow), input: "s"),
             UIKeyCommand(title: "Toggle Controls", action: #selector(toggleChrome), input: "h"),
+            UIKeyCommand(title: "Play Frames as Animation", action: #selector(playFrames), input: "a"),
         ]
         commands.forEach { $0.wantsPriorityOverSystemBehavior = true }
         return commands
@@ -456,6 +537,23 @@ extension ViewerViewController: UIPageViewControllerDataSource, UIPageViewContro
         guard completed, let page = pageViewController.viewControllers?.first as? ZoomPageViewController else { return }
         currentIndex = page.index
         didChangeIndex()
+    }
+}
+
+extension ViewerViewController: UIDragInteractionDelegate {
+    func dragInteraction(_ interaction: UIDragInteraction, itemsForBeginning session: UIDragSession) -> [UIDragItem] {
+        guard !items.isEmpty else { return [] }
+        let item = BrowserViewController.dragItem(for: items[currentIndex])
+        let page = pageController.viewControllers?.first as? ZoomPageViewController
+        if let image = page?.displayedImage {
+            item.previewProvider = {
+                let view = UIImageView(image: image)
+                view.contentMode = .scaleAspectFit
+                view.frame = CGRect(x: 0, y: 0, width: 220, height: 220 * image.size.height / max(image.size.width, 1))
+                return UIDragPreview(view: view)
+            }
+        }
+        return [item]
     }
 }
 

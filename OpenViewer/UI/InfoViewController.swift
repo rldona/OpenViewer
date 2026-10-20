@@ -95,6 +95,9 @@ final class InfoViewController: UITableViewController {
 final class InfoPanelView: GlassView {
     private let stack = UIStackView()
     private var loadingURL: URL?
+    private var palette: [UInt32] = []
+    /// Shown by the viewer, e.g. when a colour is copied.
+    var onMessage: ((String) -> Void)?
 
     init() {
         super.init(cornerRadius: 22)
@@ -109,10 +112,17 @@ final class InfoPanelView: GlassView {
 
     func show(_ item: ImageItem) {
         loadingURL = item.url
+        let known = ImageAnalysisStore.shared.record(for: item)?.palette
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let sections = InfoViewController.buildSections(item: item, url: item.url)
+            // Main colours come from the analysis store, or one small decode now (then remembered).
+            let visual = known == nil ? ImageAnalyzer.visual(item.url) : nil
             DispatchQueue.main.async {
                 guard let self, self.loadingURL == item.url else { return }
+                if let visual {
+                    ImageAnalysisStore.shared.update(item) { $0.apply(visual) }
+                }
+                self.palette = known ?? visual?.palette ?? []
                 self.render(sections)
             }
         }
@@ -133,6 +143,40 @@ final class InfoPanelView: GlassView {
                 stack.setCustomSpacing(16, after: last)
             }
         }
+        if !palette.isEmpty, let last = stack.arrangedSubviews.last {
+            stack.setCustomSpacing(16, after: last)
+            let header = UILabel()
+            header.text = "Palette"
+            header.font = .systemFont(ofSize: 15, weight: .bold)
+            stack.addArrangedSubview(header)
+            stack.setCustomSpacing(8, after: header)
+            stack.addArrangedSubview(makePaletteRow())
+        }
+    }
+
+    /// One swatch per main colour; tapping copies its HEX code.
+    private func makePaletteRow() -> UIView {
+        let row = UIStackView()
+        row.spacing = 6
+        row.distribution = .fillEqually
+        for rgb in palette {
+            let hex = ColorPalette.hex(rgb)
+            let swatch = UIButton(type: .custom, primaryAction: UIAction { [weak self] _ in
+                UIPasteboard.general.string = hex
+                self?.onMessage?("Copied \(hex)")
+            })
+            swatch.backgroundColor = ColorPalette.color(rgb)
+            swatch.layer.cornerRadius = 8
+            swatch.layer.cornerCurve = .continuous
+            swatch.layer.borderWidth = 1
+            swatch.layer.borderColor = UIColor(white: 1, alpha: 0.2).cgColor
+            swatch.heightAnchor.constraint(equalToConstant: 32).isActive = true
+            swatch.accessibilityLabel = "Copy \(hex)"
+            row.addArrangedSubview(swatch)
+        }
+        // Keep swatches square-ish when there are only a few colours.
+        for _ in palette.count..<6 { row.addArrangedSubview(UIView()) }
+        return row
     }
 
     private func makeRow(_ key: String, _ value: String) -> UIView {

@@ -1,18 +1,28 @@
+import CoreImage
 import UIKit
 
-/// Compares two images (e.g. a scene's art and its collision map): opacity overlay, a draggable
-/// swipe divider, or side by side with synchronised zoom and pan.
+/// Compares two images (e.g. a scene's art and its collision map): opacity overlay, onion skin,
+/// difference, a draggable swipe divider, or side by side with synchronised zoom and pan.
 final class CompareViewController: UIViewController, UIScrollViewDelegate {
+    /// Raw values are stored; new modes are appended so saved choices keep their meaning.
     enum Mode: Int, CaseIterable {
-        case overlay, swipe, sideBySide
+        case overlay, swipe, sideBySide, onion, difference
+
+        /// Order of the segments on screen.
+        static let displayOrder: [Mode] = [.overlay, .onion, .difference, .swipe, .sideBySide]
 
         var title: String {
             switch self {
             case .overlay: return "Overlay"
+            case .onion: return "Onion Skin"
+            case .difference: return "Difference"
             case .swipe: return "Swipe"
             case .sideBySide: return "Side by Side"
             }
         }
+
+        /// Modes drawn from images processed with Core Image.
+        var isProcessed: Bool { self == .onion || self == .difference }
     }
 
     private var items: [ImageItem]
@@ -25,6 +35,12 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
     private let baseView = UIImageView()
     private let topView = UIImageView()
     private let swipeMask = CALayer()
+    /// Onion skin (A tinted red, B tinted cyan on top) or the difference image.
+    private let processedBase = UIImageView()
+    private let processedTop = UIImageView()
+    private var processed: [Mode: (base: UIImage?, top: UIImage?)] = [:]
+    private var processingGeneration = 0
+    private static let ciContext = CIContext()
     private let divider = CompareDivider()
     private var dividerFraction: CGFloat = 0.5
 
@@ -39,7 +55,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
     // Controls.
     private let topBar = GlassView()
     private let bottomBar = GlassView()
-    private let modeControl = UISegmentedControl(items: Mode.allCases.map(\.title))
+    private let modeControl = UISegmentedControl(items: Mode.displayOrder.map(\.title))
     private let opacitySlider = UISlider()
     private let firstLabel = UILabel()
     private let secondLabel = UILabel()
@@ -117,7 +133,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         sharedScroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(sharedScroll)
         sharedScroll.addSubview(container)
-        for imageView in [baseView, topView] {
+        for imageView in [baseView, topView, processedBase, processedTop] {
             imageView.contentMode = .scaleAspectFit
             imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             container.addSubview(imageView)
@@ -156,7 +172,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         swap.accessibilityLabel = "Swap Images"
         swap.addTarget(self, action: #selector(swapImages), for: .primaryActionTriggered)
 
-        modeControl.selectedSegmentIndex = mode.rawValue
+        modeControl.selectedSegmentIndex = Mode.displayOrder.firstIndex(of: mode) ?? 0
         modeControl.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
 
         let topStack = UIStackView(arrangedSubviews: [close, UIView(), modeControl, UIView(), swap])
@@ -220,6 +236,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
         rightView.backgroundColor = background
         // In overlay mode A must show through B's transparent pixels; in swipe mode B hides A.
         topView.backgroundColor = mode == .swipe ? background : .clear
+        processedBase.backgroundColor = .black
     }
 
     private func updateLabels() {
@@ -257,7 +274,9 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
     private func setImage(_ image: UIImage, at index: Int) {
         let hadImage = images[index] != nil
         images[index] = image
+        processed = [:]
         refreshImageViews()
+        if mode.isProcessed { updateProcessed() }
         if !hadImage {
             layoutShared()
             layoutSplit()
@@ -330,14 +349,21 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
     private func apply(mode: Mode) {
         self.mode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: Self.modeKey)
-        modeControl.selectedSegmentIndex = mode.rawValue
+        modeControl.selectedSegmentIndex = Mode.displayOrder.firstIndex(of: mode) ?? 0
         let shared = mode != .sideBySide
         sharedScroll.isHidden = !shared
         splitStack.isHidden = shared
         divider.isHidden = mode != .swipe
-        opacitySlider.isHidden = mode != .overlay
+        opacitySlider.isHidden = mode != .overlay && mode != .onion
+        baseView.isHidden = mode.isProcessed
+        topView.isHidden = mode.isProcessed
+        processedBase.isHidden = !mode.isProcessed
+        processedTop.isHidden = mode != .onion
 
         switch mode {
+        case .onion, .difference:
+            processedTop.alpha = CGFloat(opacitySlider.value)
+            updateProcessed()
         case .overlay:
             topView.layer.mask = nil
             topView.alpha = CGFloat(opacitySlider.value)
@@ -352,16 +378,88 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
     }
 
     @objc private func modeChanged() {
-        apply(mode: Mode(rawValue: modeControl.selectedSegmentIndex) ?? .overlay)
+        let index = modeControl.selectedSegmentIndex
+        apply(mode: Mode.displayOrder.indices.contains(index) ? Mode.displayOrder[index] : .overlay)
     }
 
     @objc private func opacityChanged() {
         topView.alpha = CGFloat(opacitySlider.value)
+        processedTop.alpha = CGFloat(opacitySlider.value)
+    }
+
+    // MARK: Processed modes
+
+    /// Shows (computing once, off the main thread) the onion skin or difference images.
+    private func updateProcessed() {
+        if let cached = processed[mode] {
+            processedBase.image = cached.base
+            processedTop.image = cached.top
+            return
+        }
+        guard let a = images[0], let b = images[1] else { return }
+        processingGeneration += 1
+        let generation = processingGeneration
+        let mode = self.mode
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Self.process(mode, a, b)
+            DispatchQueue.main.async {
+                guard let self, self.processingGeneration == generation else { return }
+                self.processed[mode] = result
+                if self.mode == mode {
+                    self.processedBase.image = result.base
+                    self.processedTop.image = result.top
+                }
+            }
+        }
+    }
+
+    /// Both images on black at A's size (B fitted inside it), then tinted or differenced.
+    static func process(_ mode: Mode, _ a: UIImage, _ b: UIImage) -> (base: UIImage?, top: UIImage?) {
+        guard let cgA = a.cgImage, let cgB = b.cgImage else { return (nil, nil) }
+        let extent = CGRect(x: 0, y: 0, width: cgA.width, height: cgA.height)
+        let black = CIImage(color: .black).cropped(to: extent)
+        let imageA = CIImage(cgImage: cgA).composited(over: black)
+        var imageB = CIImage(cgImage: cgB)
+        let scale = min(extent.width / imageB.extent.width, extent.height / imageB.extent.height)
+        imageB = imageB.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        imageB = imageB.transformed(by: CGAffineTransform(translationX: (extent.width - imageB.extent.width) / 2,
+                                                          y: (extent.height - imageB.extent.height) / 2))
+        imageB = imageB.composited(over: black).cropped(to: extent)
+
+        func render(_ image: CIImage) -> UIImage? {
+            ciContext.createCGImage(image, from: extent).map { UIImage(cgImage: $0, scale: a.scale, orientation: .up) }
+        }
+        func tinted(_ image: CIImage, _ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CIImage {
+            image.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputRVector": CIVector(x: r, y: 0, z: 0, w: 0),
+                    "inputGVector": CIVector(x: 0, y: g, z: 0, w: 0),
+                    "inputBVector": CIVector(x: 0, y: 0, z: b, w: 0),
+                ])
+        }
+        switch mode {
+        case .onion:
+            return (render(tinted(imageA, 1, 0.35, 0.3)), render(tinted(imageB, 0.25, 0.9, 1)))
+        case .difference:
+            // Boosted so faint changes stand out; identical areas stay black.
+            let difference = imageB.applyingFilter("CIDifferenceBlendMode", parameters: [kCIInputBackgroundImageKey: imageA])
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputRVector": CIVector(x: 3, y: 0, z: 0, w: 0),
+                    "inputGVector": CIVector(x: 0, y: 3, z: 0, w: 0),
+                    "inputBVector": CIVector(x: 0, y: 0, z: 3, w: 0),
+                ])
+                .cropped(to: extent)
+            return (render(difference), nil)
+        default:
+            return (nil, nil)
+        }
     }
 
     @objc private func swapImages() {
         items.swapAt(0, 1)
         images.swapAt(0, 1)
+        processed = [:]
+        if mode.isProcessed { updateProcessed() }
         refreshImageViews()
         updateLabels()
         layoutShared()
@@ -435,6 +533,8 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
             UIKeyCommand(title: "Overlay", action: #selector(selectOverlay), input: "1"),
             UIKeyCommand(title: "Swipe", action: #selector(selectSwipe), input: "2"),
             UIKeyCommand(title: "Side by Side", action: #selector(selectSideBySide), input: "3"),
+            UIKeyCommand(title: "Onion Skin", action: #selector(selectOnion), input: "4"),
+            UIKeyCommand(title: "Difference", action: #selector(selectDifference), input: "5"),
             UIKeyCommand(title: "Swap", action: #selector(swapImages), input: "x"),
             UIKeyCommand(title: "Move Divider Left", action: #selector(dividerLeft), input: UIKeyCommand.inputLeftArrow),
             UIKeyCommand(title: "Move Divider Right", action: #selector(dividerRight), input: UIKeyCommand.inputRightArrow),
@@ -446,7 +546,7 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
 
     /// Instantly shows only A or only B, the quickest way to spot differences.
     @objc private func flip() {
-        if mode != .overlay { apply(mode: .overlay) }
+        if mode != .overlay && mode != .onion { apply(mode: .overlay) }
         opacitySlider.value = opacitySlider.value < 0.5 ? 1 : 0
         opacityChanged()
     }
@@ -454,6 +554,8 @@ final class CompareViewController: UIViewController, UIScrollViewDelegate {
     @objc private func selectOverlay() { apply(mode: .overlay) }
     @objc private func selectSwipe() { apply(mode: .swipe) }
     @objc private func selectSideBySide() { apply(mode: .sideBySide) }
+    @objc private func selectOnion() { apply(mode: .onion) }
+    @objc private func selectDifference() { apply(mode: .difference) }
 
     @objc private func dividerLeft() { moveDivider(by: -0.05) }
     @objc private func dividerRight() { moveDivider(by: 0.05) }

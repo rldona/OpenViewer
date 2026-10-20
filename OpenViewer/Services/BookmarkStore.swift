@@ -73,18 +73,19 @@ final class BookmarkStore {
     }
 }
 
-/// Keeps security-scoped access open while a folder tree is being browsed.
+/// Keeps security-scoped access open while a folder tree is being browsed. Each window (owner)
+/// keeps its own set, so switching folders in one window never cuts off another; the system
+/// counts starts and stops per URL, so two windows can hold the same folder.
 enum ScopedAccess {
-    private static var active: [URL] = []
+    private static var active: [ObjectIdentifier: [URL]] = [:]
 
-    static func begin(_ url: URL) {
+    static func begin(_ url: URL, owner: AnyObject) {
         if url.startAccessingSecurityScopedResource() {
-            active.append(url)
+            active[ObjectIdentifier(owner), default: []].append(url)
         }
     }
 
-    static func endAll() {
-        active.forEach { $0.stopAccessingSecurityScopedResource() }
-        active.removeAll()
+    static func endAll(owner: AnyObject) {
+        active.removeValue(forKey: ObjectIdentifier(owner))?.forEach { $0.stopAccessingSecurityScopedResource() }
     }
 }

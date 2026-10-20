@@ -11,7 +11,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      configurationForConnecting connectingSceneSession: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
-        UISceneConfiguration(name: "Default", sessionRole: connectingSceneSession.role)
+        // A TV or monitor without Stage Manager shows the open image full screen.
+        connectingSceneSession.role == .windowExternalDisplayNonInteractive
+            ? UISceneConfiguration(name: "External Display", sessionRole: connectingSceneSession.role)
+            : UISceneConfiguration(name: "Default", sessionRole: connectingSceneSession.role)
     }
 
     func applicationDidReceiveMemoryWarning(_ application: UIApplication) {
@@ -54,6 +57,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.overrideUserInterfaceStyle = Appearance.current.style
         window.makeKeyAndVisible()
         self.window = window
+
+        // A window opened with "Open in New Window" starts in its folder.
+        if let url = connectionOptions.userActivities.lazy.compactMap(WindowOpener.folder(from:)).first {
+            sidebar.openFolder(url)
+            windowScene.title = url.lastPathComponent
+        }
     }
 }
 
@@ -66,4 +75,27 @@ final class RootNavigationController: UINavigationController {
 final class RootSplitViewController: UISplitViewController {
     override var prefersStatusBarHidden: Bool { true }
     override var childForStatusBarHidden: UIViewController? { nil }
+}
+
+/// Opens a folder in a new window (Stage Manager, Split View).
+enum WindowOpener {
+    static let activityType = "io.github.rldona.OpenViewer.openFolder"
+    private static let bookmarkKey = "bookmark"
+
+    static func open(_ url: URL) {
+        let activity = NSUserActivity(activityType: activityType)
+        guard let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else { return }
+        activity.userInfo = [bookmarkKey: bookmark]
+        activity.title = url.lastPathComponent
+        let request = UISceneSessionActivationRequest(role: .windowApplication, userActivity: activity)
+        UIApplication.shared.activateSceneSession(for: request) { error in
+            print("Open in New Window failed: \(error)")
+        }
+    }
+
+    static func folder(from activity: NSUserActivity) -> URL? {
+        guard activity.activityType == activityType, let data = activity.userInfo?[bookmarkKey] as? Data else { return nil }
+        var stale = false
+        return try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
+    }
 }

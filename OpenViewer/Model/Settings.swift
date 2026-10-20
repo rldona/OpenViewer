@@ -60,4 +60,10 @@ enum Settings {
         get { defaults.object(forKey: "reopenLastFolder") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "reopenLastFolder") }
     }
+
+    /// The search box also matches text recognised inside images (indexed in the background).
+    static var searchTextInImages: Bool {
+        get { defaults.bool(forKey: "searchTextInImages") }
+        set { defaults.set(newValue, forKey: "searchTextInImages") }
+    }
 }
