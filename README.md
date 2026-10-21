@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="OpenViewer/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png" width="128" alt="OpenViewer icon">
+  <img src="docs/assets/cover.png" alt="OpenViewer: browse huge image folders. Fast, on your iPad." width="860">
 </p>
 
 <h1 align="center">OpenViewer</h1>

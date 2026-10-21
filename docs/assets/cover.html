@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Repository cover / GitHub social preview (1280x640). Rendered into cover.png by scripts/make-cover.sh. -->
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    font-family: -apple-system, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    color: #fff; position: relative;
+    background:
+      radial-gradient(900px 600px at 105% 105%, rgba(79, 70, 229, .55), transparent 62%),
+      radial-gradient(700px 500px at -10% -20%, rgba(59, 130, 246, .26), transparent 60%),
+      linear-gradient(135deg, #0a0b1a 0%, #141638 60%, #0e1030 100%);
+  }
+  .brand { position: absolute; left: 76px; top: 86px; width: 540px; }
+  .icon { width: 132px; height: 132px; display: block; border-radius: 30px; filter: drop-shadow(0 14px 28px rgba(0, 0, 0, .45)); }
+  h1 { font-size: 92px; line-height: 1; letter-spacing: -2.5px; margin-top: 34px; font-weight: 800; }
+  .tag { font-size: 32px; line-height: 1.3; margin-top: 22px; color: #d3d6f7; font-weight: 500; }
+  .chips { display: flex; flex-wrap: nowrap; gap: 8px; margin-top: 34px; white-space: nowrap; }
+  .chip { font-size: 17px; padding: 6px 13px; border-radius: 999px; border: 1.5px solid rgba(255,255,255,.28); background: rgba(255,255,255,.07); color: #e8e9fb; }
+  /* iPad frame: no title bar, a thin dark bezel instead. */
+  .shot {
+    position: absolute; left: 640px; top: 96px; width: 760px; border-radius: 26px; overflow: hidden;
+    padding: 12px; background: #050507;
+    box-shadow: 0 40px 80px rgba(0, 0, 0, .6), 0 0 0 1.5px rgba(255, 255, 255, .14);
+  }
+  .shot img { display: block; width: 100%; border-radius: 14px; }
+</style>
+</head>
+<body>
+  <div class="brand">
+    <img class="icon" src="../../OpenViewer/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png" alt="OpenViewer icon">
+    <h1>OpenViewer</h1>
+    <p class="tag">Browse huge image folders.<br>Fast, on your iPad.</p>
+    <div class="chips">
+      <span class="chip">Open source</span><span class="chip">No accounts</span><span class="chip">No import</span><span class="chip">iPad</span>
+    </div>
+  </div>
+  <div class="shot">
+    <img src="screenshot.jpg" alt="OpenViewer">
+  </div>
+</body>
+</html>
