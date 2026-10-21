@@ -74,3 +74,27 @@ class GlassView: UIVisualEffectView {
         ])
     }
 }
+
+extension UIViewController {
+    /// The part of the view not covered by bars or the floating sidebar, in the view's coordinates.
+    /// On iPadOS 26 the sidebar floats over the detail column, so the view's bounds still run under it.
+    var areaClearOfSidebar: CGRect {
+        var area = view.bounds.inset(by: view.safeAreaInsets)
+        if let split = splitViewController, !split.isCollapsed, split.displayMode != .secondaryOnly,
+           let sidebar = split.viewController(for: .primary)?.view, sidebar.window != nil {
+            let frame = sidebar.convert(sidebar.bounds, to: view)
+            if frame.intersects(view.bounds), frame.maxX > area.minX, frame.minX <= view.bounds.minX + 1 {
+                area = CGRect(x: frame.maxX, y: area.minY, width: max(area.maxX - frame.maxX, 0), height: area.height)
+            }
+        }
+        return area
+    }
+
+    /// Calls `update` whenever the sidebar is shown or hidden, and once more after it settles.
+    func observeSidebarChanges(_ update: @escaping () -> Void) {
+        NotificationCenter.default.addObserver(forName: RootSplitViewController.sidebarDidChange, object: nil, queue: .main) { _ in
+            update()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { update() }
+        }
+    }
+}

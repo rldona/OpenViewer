@@ -34,6 +34,8 @@ final class FavoritesStore {
         entries[Self.key(url)] != nil
     }
 
+    func contains(key: String) -> Bool { entries[key] != nil }
+
     /// Snapshot of all keys, for filtering large lists off the main thread with `key(path:)`.
     var keys: Set<String> { Set(entries.keys) }
 

@@ -17,6 +17,8 @@ final class BrowserViewController: UIViewController {
     private var collectionView: UICollectionView!
     private let titleView = TitleView()
     private let emptyLabel = UILabel()
+    /// Holds `emptyLabel` as the grid's background, so the label can be centred beside the sidebar.
+    private let emptyView = UIView()
 
     private var allFolders: [FolderItem] = []
     private var allImages: [ImageItem] = []
@@ -50,6 +52,10 @@ final class BrowserViewController: UIViewController {
     /// Latest requested generation, readable from the filter queue.
     private let latestFilter = OSAllocatedUnfairLock(initialState: 0)
     private var lastResolverStart: CFAbsoluteTime = 0
+    /// Newly read image sizes reshape the grid; while scrolling that happens at most once a second.
+    private var pendingMetricsRefilter = false
+    private var lastMetricsRefilter: CFAbsoluteTime = 0
+    private var lastPrioritize: CFAbsoluteTime = 0
     private var minimumSide = Settings.minimumImageSide
     /// Only images where this colour family is prominent (needs colour analysis).
     private var colorFilter: ColorFamily?
@@ -179,6 +185,8 @@ final class BrowserViewController: UIViewController {
         emptyLabel.textAlignment = .center
         emptyLabel.numberOfLines = 0
         emptyLabel.font = .preferredFont(forTextStyle: .title3)
+        emptyView.addSubview(emptyLabel)
+        observeSidebarChanges { [weak self] in self?.positionEmptyLabel() }
 
         let search = UISearchController(searchResultsController: nil)
         search.searchResultsUpdater = self
@@ -237,6 +245,19 @@ final class BrowserViewController: UIViewController {
         super.viewWillLayoutSubviews()
         let sidebarShown = splitViewController.map { !$0.isCollapsed && $0.displayMode != .secondaryOnly } ?? false
         layout.imageInset = sidebarShown ? 16 : 0
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        positionEmptyLabel()
+    }
+
+    /// Centred in what the floating sidebar and the bars leave visible, not under the sidebar.
+    private func positionEmptyLabel() {
+        guard collectionView.backgroundView === emptyView else { return }
+        emptyView.layoutIfNeeded()
+        let area = view.convert(areaClearOfSidebar, to: emptyView).insetBy(dx: 24, dy: 0)
+        emptyLabel.frame = area.width > 0 ? area : emptyView.bounds
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -463,9 +484,9 @@ final class BrowserViewController: UIViewController {
             ? (folderURL ?? URL(fileURLWithPath: "/")) : nil
         let rootName = displayName
         let emptyFolders = hideEmptyFolders ? knownEmptyFolders() : []
-        let analysis = ImageAnalysisStore.shared
-        let colorKeys: Set<String>? = colorFilter.map { analysis.keys(matching: $0) }
-        let textKeys: Set<String> = searchesText && !query.isEmpty ? analysis.keys(containingText: query) : []
+        // The analysis store is only touched (and read from disk) when a filter needs it.
+        let colorKeys: Set<String>? = colorFilter.map { ImageAnalysisStore.shared.keys(matching: $0) }
+        let textKeys: Set<String> = searchesText && !query.isEmpty ? ImageAnalysisStore.shared.keys(containingText: query) : []
         let tagKeys: Set<String>? = tagFilter.map { TagStore.shared.keys(for: $0) }
         let needsKey = favoriteKeys != nil || colorKeys != nil || tagKeys != nil || !textKeys.isEmpty
 
@@ -491,14 +512,16 @@ final class BrowserViewController: UIViewController {
                 base.append(item)
             }
 
-            let store = ImageMetricsStore.shared
+            let allMetrics = ImageMetricsStore.shared.metrics(for: base.map(\.url))
             var images: [ImageItem] = []
             var sourceIndices: [Int] = []
             var ratios: [CGFloat] = []
             var hidden = 0
             images.reserveCapacity(base.count)
+            ratios.reserveCapacity(base.count)
+            sourceIndices.reserveCapacity(base.count)
             for (index, item) in base.enumerated() {
-                let metrics = store.metrics(for: item.url)
+                let metrics = allMetrics[index]
                 // Unknown sizes stay visible until the resolver has read them.
                 if minimumSide > 0, let metrics, metrics.maxSide > 0, metrics.maxSide < minimumSide {
                     hidden += 1
@@ -624,7 +647,7 @@ final class BrowserViewController: UIViewController {
             if let info = cache.cached(folder.url) {
                 if !info.containsImages { empty.insert(folder.url) }
             } else {
-                cache.info(for: folder.url) { [weak self] info in
+                cache.info(for: folder.url, modified: folder.modified) { [weak self] info in
                     if !info.containsImages { self?.scheduleFolderRefilter() }
                 }
             }
@@ -667,11 +690,31 @@ final class BrowserViewController: UIViewController {
         let generation = contentGeneration
         let resolver = MetricsResolver(urls: baseImages.map(\.url)) { [weak self] in
             guard let self, generation == self.contentGeneration else { return }
-            self.applyFilter(keepPosition: true, restartResolver: false)
+            self.metricsArrived()
         }
         self.resolver = resolver
         prioritizeVisible()
         resolver.start()
+    }
+
+    /// Each batch of sizes relayouts the whole grid; during a scroll, batches are merged so the
+    /// grid doesn't stutter, and the last one is applied as soon as the scroll stops.
+    private func metricsArrived() {
+        let now = CFAbsoluteTimeGetCurrent()
+        if collectionView.isDragging || collectionView.isDecelerating, now - lastMetricsRefilter < 1 {
+            pendingMetricsRefilter = true
+            return
+        }
+        pendingMetricsRefilter = false
+        lastMetricsRefilter = now
+        applyFilter(keepPosition: true, restartResolver: false)
+    }
+
+    private func applyPendingMetrics() {
+        guard pendingMetricsRefilter else { return }
+        pendingMetricsRefilter = false
+        lastMetricsRefilter = CFAbsoluteTimeGetCurrent()
+        applyFilter(keepPosition: true, restartResolver: false)
     }
 
     private func prioritizeVisible() {
@@ -749,6 +792,9 @@ final class BrowserViewController: UIViewController {
         if !isScanning && folders.isEmpty && images.isEmpty {
             if !query.isEmpty {
                 emptyLabel.text = "No matches for “\(query)”"
+            } else if showsOnlyFavorites && isFavoritesView && FavoritesStore.shared.count > 0 {
+                // Favourites exist, but in folders removed from the sidebar or on a disconnected drive.
+                emptyLabel.text = "Your favorites can't be reached\nThey're in folders that are no longer in the sidebar or on a drive that isn't connected. Open their folder again to see them."
             } else if showsOnlyFavorites {
                 emptyLabel.text = "No favorites yet\nTap ♥︎ in the viewer, press F, or long-press a thumbnail."
             } else if collection?.isDuplicates == true {
@@ -756,7 +802,8 @@ final class BrowserViewController: UIViewController {
             } else {
                 emptyLabel.text = "No images here"
             }
-            collectionView.backgroundView = emptyLabel
+            collectionView.backgroundView = emptyView
+            positionEmptyLabel()
         } else {
             collectionView.backgroundView = nil
         }
@@ -1871,7 +1918,20 @@ extension BrowserViewController: UICollectionViewDataSourcePrefetching {
 extension BrowserViewController: UICollectionViewDelegate {
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         fastScroller?.scrollViewDidScroll()
-        prioritizeVisible()
+        // Telling the resolver what is on screen ~10 times a second is plenty.
+        let now = CFAbsoluteTimeGetCurrent()
+        if resolver != nil, now - lastPrioritize > 0.1 {
+            lastPrioritize = now
+            prioritizeVisible()
+        }
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { applyPendingMetrics() }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        applyPendingMetrics()
     }
 
     func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {

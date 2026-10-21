@@ -123,11 +123,14 @@ final class ThumbnailCell: UICollectionViewCell {
     }
 
     func updateFavorite() {
-        let isFavorite = representedURL.map(FavoritesStore.shared.contains) ?? false
+        // One key for both lookups: building it standardizes the path, which isn't free per cell.
+        let key = representedURL.map(FavoritesStore.key)
+        let isFavorite = key.map(FavoritesStore.shared.contains(key:)) ?? false
         favoriteBadge.isHidden = !isFavorite
-        let tags = representedURL.map(TagStore.shared.tags(for:)) ?? []
+        let tags = key.map(TagStore.shared.tags(forKey:)) ?? []
         updateTagDots(tags)
-        accessibilityValue = ([isFavorite ? "Favorite" : nil] + tags.map { "\($0.title) tag" }).compactMap { $0 }.joined(separator: ", ")
+        accessibilityValue = tags.isEmpty ? (isFavorite ? "Favorite" : nil)
+            : ([isFavorite ? "Favorite" : nil] + tags.map { "\($0.title) tag" }).compactMap { $0 }.joined(separator: ", ")
     }
 
     private func updateTagDots(_ tags: [TagColor]) {
@@ -301,7 +304,7 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         } else {
             detailLabel.text = " "
             setTileCount(0)
-            FolderInfoCache.shared.info(for: folder.url) { [weak self] info in
+            FolderInfoCache.shared.info(for: folder.url, modified: folder.modified) { [weak self] info in
                 guard let self, self.representedURL == folder.url else { return }
                 self.apply(info, for: folder.url)
             }
@@ -336,7 +339,7 @@ final class FolderCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
                 continue
             }
             tile.image = nil
-            if let token = ImagePipeline.thumbnails.load(request, completion: { [weak self, weak tile] image in
+            if let token = ImagePipeline.thumbnails.load(request, priority: .high, completion: { [weak self, weak tile] image in
                 guard let self, self.representedURL == url else { return }
                 tile?.image = image
             }) {

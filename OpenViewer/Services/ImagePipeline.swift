@@ -142,6 +142,9 @@ final class ImagePipeline {
         set { queue.isSuspended = newValue }
     }
 
+    /// Blocks until queued disk-cache writes are done (tests).
+    func waitForDiskWritesForTesting() { diskQueue.sync {} }
+
     func clearMemory() {
         memory.removeAllObjects()
     }
@@ -155,6 +158,12 @@ final class ImagePipeline {
         legacy += (1..<diskFormatVersion).map { "thumbnails-v\($0)" }
         DispatchQueue.global(qos: .background).async {
             for name in legacy { try? FileManager.default.removeItem(at: root.appendingPathComponent(name)) }
+            // Scan snapshots used to be property lists.
+            let scans = root.appendingPathComponent("scans", isDirectory: true)
+            for file in (try? FileManager.default.contentsOfDirectory(at: scans, includingPropertiesForKeys: nil)) ?? []
+            where file.pathExtension == "plist" {
+                try? FileManager.default.removeItem(at: file)
+            }
         }
     }
 
@@ -190,14 +199,27 @@ final class ImagePipeline {
     private func produce(_ request: Request) -> UIImage? {
         let diskURL = diskDirectory.map { $0.appendingPathComponent(Self.hash(request.diskKey) + ".thumb") }
         if let diskURL, FileManager.default.fileExists(atPath: diskURL.path), let cached = Self.decodeFully(diskURL) {
-            return UIImage(cgImage: cached)
+            return Self.displayReady(cached)
         }
-        guard let cg = Self.downsample(request.url, maxPixel: request.maxPixel) else { return nil }
-        if let diskURL {
-            diskQueue.async { Self.writeThumbnail(cg, to: diskURL) }
+        guard let result = Self.downsampleWithInfo(request.url, maxPixel: request.maxPixel) else { return nil }
+        // A small file decoded at full size is as quick to decode again as its cached copy would be.
+        let worthCaching = !(result.isFullSize && request.fileSize > 0 && request.fileSize < Self.smallFileBytes)
+        if let diskURL, worthCaching {
+            let image = result.image
+            diskQueue.async { Self.writeThumbnail(image, to: diskURL) }
         }
-        return UIImage(cgImage: cg)
+        return Self.displayReady(result.image)
     }
+
+    /// Converts unusual pixel formats (grayscale, 16-bit, CMYK…) here, off the main thread, instead
+    /// of during Core Animation's commit while scrolling. A no-op (~0.01 ms) for ordinary images.
+    private static func displayReady(_ image: CGImage) -> UIImage {
+        let uiImage = UIImage(cgImage: image)
+        return uiImage.preparingForDisplay() ?? uiImage
+    }
+
+    /// Files below this size that need no downscaling are not copied to the disk cache.
+    static let smallFileBytes = 3 << 20
 
     // MARK: ImageIO helpers
 
@@ -205,23 +227,43 @@ final class ImagePipeline {
     /// bitmap when it can be avoided. Embedded previews (EXIF thumbnails, RAW previews) are used
     /// when they are large enough, which is dramatically faster for camera files.
     static func downsample(_ url: URL, maxPixel: Int) -> CGImage? {
+        downsampleWithInfo(url, maxPixel: maxPixel)?.image
+    }
+
+    /// Formats that can carry an embedded preview worth trying before a real decode.
+    private static let previewTypes: Set<String> = [UTType.jpeg.identifier, UTType.heic.identifier, UTType.heif.identifier,
+                                                    UTType.tiff.identifier, "com.adobe.raw-image"]
+
+    /// `isFullSize`: the image was not reduced (it is no larger than `maxPixel`).
+    static func downsampleWithInfo(_ url: URL, maxPixel: Int) -> (image: CGImage, isFullSize: Bool)? {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
-
+        // The header gives the real size: small images (sprites, icons) are decoded once, at full size.
+        var side = Int.max
+        if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int, w > 0, h > 0 {
+            side = max(w, h)
+        }
+        let target = min(maxPixel, side)
         var options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceThumbnailMaxPixelSize: target,
         ]
-        if let embedded = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-           max(embedded.width, embedded.height) >= maxPixel {
-            // Only when it is at least as large as requested: an embedded preview is never upscaled.
-            return embedded
+        let type = CGImageSourceGetType(source).map { $0 as String } ?? ""
+        let mayHavePreview = previewTypes.contains(type) || UTType(type)?.conforms(to: .rawImage) == true
+        if mayHavePreview {
+            options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = true
+            if let embedded = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+               max(embedded.width, embedded.height) >= target {
+                // Only when it is at least as large as requested: an embedded preview is never upscaled.
+                return (embedded, target == side)
+            }
+            options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
         }
-        options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
         options[kCGImageSourceCreateThumbnailFromImageAlways] = true
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return (image, target == side)
     }
 
     static func decodeFully(_ url: URL) -> CGImage? {
@@ -241,15 +283,15 @@ final class ImagePipeline {
     }
 
     /// Bump when the on-disk thumbnail format changes; older caches are deleted.
-    static let diskFormatVersion = 2
+    static let diskFormatVersion = 3
 
-    /// Images with transparency are stored as lossless PNG (JPEG/HEIC would lose the alpha channel).
-    /// Opaque ones use HEIC at 0.95: measured at ~54 dB PSNR on line art and ~41 dB on photos
-    /// against a fresh decode (visually lossless), at a fraction of PNG's size. JPEG is the fallback.
+    /// Images with transparency are stored as lossless PNG (JPEG would lose the alpha channel).
+    /// Opaque ones use JPEG at 0.95 (visually lossless). HEIC was smaller but, measured on an A12X,
+    /// took ~31 ms to encode and 3× longer than JPEG to decode: slower than the original photo.
     private static func writeThumbnail(_ image: CGImage, to url: URL) {
         if hasAlpha(image) {
             encode(image, as: .png, quality: nil, to: url)
-        } else if !encode(image, as: .heic, quality: 0.95, to: url) {
+        } else {
             encode(image, as: .jpeg, quality: 0.95, to: url)
         }
     }

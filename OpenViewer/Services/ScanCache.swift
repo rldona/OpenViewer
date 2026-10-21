@@ -3,16 +3,16 @@ import Foundation
 
 /// A persisted picture of a folder tree: every directory with its modification date, its
 /// subfolders and its images, each list already in natural name order.
-struct ScanSnapshot: Codable {
-    static let currentVersion = 1
+struct ScanSnapshot {
+    static let currentVersion = 2
 
-    struct File: Codable {
+    struct File {
         var name: String
         var size: Int
         var modified: Double
     }
 
-    struct Directory: Codable {
+    struct Directory {
         /// Directory modification date; it changes when entries are added, removed or renamed.
         var modified: Double
         var subdirectories: [String]
@@ -57,23 +57,61 @@ enum ScanCache {
     private static func fileURL(for root: URL) -> URL? {
         let key = PathKey.make(root.standardizedFileURL.path)
         let name = SHA256.hash(data: Data(key.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
-        return directory?.appendingPathComponent(name + ".plist")
+        return directory?.appendingPathComponent(name + ".scan")
     }
 
+    private static let magic = "OVSC"
+
     static func load(root: URL) -> ScanSnapshot? {
-        guard let url = fileURL(for: root), let data = try? Data(contentsOf: url),
-              let snapshot = try? PropertyListDecoder().decode(ScanSnapshot.self, from: data),
-              snapshot.version == ScanSnapshot.currentVersion else { return nil }
-        return snapshot
+        guard let url = fileURL(for: root), let data = try? Data(contentsOf: url) else { return nil }
+        return decode(data)
     }
 
     static func save(_ snapshot: ScanSnapshot, root: URL) {
         guard let url = fileURL(for: root) else { return }
-        let encoder = PropertyListEncoder()
-        encoder.outputFormat = .binary
-        guard let data = try? encoder.encode(snapshot) else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: url, options: .atomic)
+        try? encode(snapshot).write(to: url, options: .atomic)
+    }
+
+    static func encode(_ snapshot: ScanSnapshot) -> Data {
+        var writer = BinaryWriter(magic: magic, version: UInt32(ScanSnapshot.currentVersion))
+        writer.writeCount(snapshot.directories.count)
+        for (relative, directory) in snapshot.directories {
+            writer.write(relative)
+            writer.write(directory.modified)
+            writer.writeCount(directory.subdirectories.count)
+            for name in directory.subdirectories { writer.write(name) }
+            writer.writeCount(directory.files.count)
+            for file in directory.files {
+                writer.write(file.name)
+                writer.write(Int64(file.size))
+                writer.write(file.modified)
+            }
+        }
+        return writer.data
+    }
+
+    static func decode(_ data: Data) -> ScanSnapshot? {
+        guard var reader = BinaryReader(data: data, magic: magic, version: UInt32(ScanSnapshot.currentVersion)) else { return nil }
+        var snapshot = ScanSnapshot()
+        let count = reader.readCount()
+        snapshot.directories.reserveCapacity(count)
+        for _ in 0..<count {
+            let relative = reader.readString()
+            let modified = reader.readDouble()
+            let subdirectories = (0..<reader.readCount()).map { _ in reader.readString() }
+            let fileCount = reader.readCount()
+            var files: [ScanSnapshot.File] = []
+            files.reserveCapacity(fileCount)
+            for _ in 0..<fileCount {
+                let name = reader.readString()
+                let size = Int(reader.read(Int64.self))
+                files.append(ScanSnapshot.File(name: name, size: size, modified: reader.readDouble()))
+            }
+            guard reader.isValid else { return nil }
+            snapshot.directories[relative] = ScanSnapshot.Directory(modified: modified, subdirectories: subdirectories, files: files)
+        }
+        return reader.isValid ? snapshot : nil
     }
 
     static func remove(root: URL) {

@@ -26,13 +26,30 @@ final class ImageMetricsStore {
 
     private init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        fileURL = caches?.appendingPathComponent("OpenViewer/image-metrics.plist")
-        if let fileURL, let data = try? Data(contentsOf: fileURL),
-           let stored = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: [Float]] {
+        fileURL = caches?.appendingPathComponent("OpenViewer/image-metrics.bin")
+        if let fileURL, let data = try? Data(contentsOf: fileURL), let stored = Self.decode(data) {
             entries = stored
+        } else if let legacy = caches?.appendingPathComponent("OpenViewer/image-metrics.plist"),
+                  let data = try? Data(contentsOf: legacy),
+                  let stored = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: [Float]] {
+            // Earlier versions stored a property list.
+            entries = stored
+            dirty = true
+            try? FileManager.default.removeItem(at: legacy)
         }
         NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                object: nil, queue: nil) { [weak self] _ in self?.save() }
+    }
+
+    /// Metrics for many files under a single lock (filtering big lists).
+    func metrics(for urls: [URL]) -> [ImageMetrics?] {
+        let keys = urls.map { PathKey.make($0.path) }
+        lock.lock()
+        defer { lock.unlock() }
+        return keys.map { key in
+            guard let values = entries[key], values.count == 2 else { return nil }
+            return ImageMetrics(ratio: CGFloat(values[0]), maxSide: Int(values[1]))
+        }
     }
 
     func metrics(for url: URL) -> ImageMetrics? {
@@ -69,10 +86,35 @@ final class ImageMetricsStore {
         dirty = false
         lock.unlock()
         saveQueue.async {
-            guard let data = try? PropertyListSerialization.data(fromPropertyList: snapshot, format: .binary, options: 0) else { return }
             try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: fileURL, options: .atomic)
+            try? Self.encode(snapshot).write(to: fileURL, options: .atomic)
         }
+    }
+
+    private static let magic = "OVIM"
+
+    static func encode(_ entries: [String: [Float]]) -> Data {
+        var writer = BinaryWriter(magic: magic, version: 1)
+        let valid = entries.filter { $0.value.count == 2 }
+        writer.writeCount(valid.count)
+        for (key, values) in valid {
+            writer.write(key)
+            writer.write(values[0])
+            writer.write(values[1])
+        }
+        return writer.data
+    }
+
+    static func decode(_ data: Data) -> [String: [Float]]? {
+        guard var reader = BinaryReader(data: data, magic: magic, version: 1) else { return nil }
+        let count = reader.readCount()
+        var entries: [String: [Float]] = [:]
+        entries.reserveCapacity(count)
+        for _ in 0..<count {
+            let key = reader.readString()
+            entries[key] = [reader.readFloat(), reader.readFloat()]
+        }
+        return reader.isValid ? entries : nil
     }
 }
 

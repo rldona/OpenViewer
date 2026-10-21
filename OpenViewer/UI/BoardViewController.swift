@@ -11,6 +11,10 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
     private var itemViews: [UUID: BoardItemView] = [:]
     private var saveScheduled = false
     private let emptyLabel = UILabel()
+    private var emptyCenterX: NSLayoutConstraint!
+    private var emptyCenterY: NSLayoutConstraint!
+    /// Positions before the last "Arrange", so it can be undone (cleared by any later change).
+    private var itemsBeforeArrange: [BoardItem]?
 
     init(board: Board) {
         self.board = board
@@ -50,9 +54,11 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
         emptyLabel.font = .preferredFont(forTextStyle: .title3)
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(emptyLabel)
+        // Centred beside the floating sidebar (constants set from `visibleArea` on layout).
+        emptyCenterX = emptyLabel.centerXAnchor.constraint(equalTo: view.leadingAnchor)
+        emptyCenterY = emptyLabel.centerYAnchor.constraint(equalTo: view.topAnchor)
         NSLayoutConstraint.activate([
-            emptyLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            emptyCenterX, emptyCenterY,
             emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -64),
         ])
 
@@ -62,6 +68,7 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
                      image: UIImage(systemName: "photo.badge.plus")) { [weak self] _ in self?.pickImages() },
             UIAction(title: "Show Everything", subtitle: "Zoom to fit all images on screen",
                      image: UIImage(systemName: "rectangle.arrowtriangle.2.inward")) { [weak self] _ in self?.fitAll(animated: true) },
+            UIDeferredMenuElement.uncached { [weak self] completion in completion(self?.arrangeMenuElements() ?? []) },
             UIMenu(options: .displayInline, children: [
                 UIAction(title: "Export as Image", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in self?.export() },
                 UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in self?.rename() },
@@ -69,11 +76,7 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
         ]))
         more.accessibilityLabel = "Board Options"
         navigationItem.rightBarButtonItems = [more]
-        NotificationCenter.default.addObserver(forName: RootSplitViewController.sidebarDidChange, object: nil, queue: .main) { [weak self] _ in
-            self?.refitIfNeeded()
-            // Once more after the sidebar has settled in its final place.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.refitIfNeeded() }
-        }
+        observeSidebarChanges { [weak self] in self?.refitIfNeeded() }
         if presentingViewController != nil, navigationController?.viewControllers.first === self {
             navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
                 self?.dismiss(animated: true)
@@ -102,6 +105,10 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
 
     private func refitIfNeeded(animated: Bool = true) {
         let area = visibleArea
+        if emptyCenterX.constant != area.midX || emptyCenterY.constant != area.midY {
+            emptyCenterX.constant = area.midX
+            emptyCenterY.constant = area.midY
+        }
         guard area.width > 0, area != lastVisibleArea else { return }
         lastVisibleArea = area
         if isFitted { fitAll(animated: animated) }
@@ -110,18 +117,7 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { isFitted = false }
     func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { isFitted = false }
 
-    /// The part of the screen not covered by bars or the floating sidebar, in this view's coordinates.
-    private var visibleArea: CGRect {
-        var area = view.bounds.inset(by: view.safeAreaInsets)
-        if let split = splitViewController, !split.isCollapsed, split.displayMode != .secondaryOnly,
-           let sidebar = split.viewController(for: .primary)?.view, sidebar.window != nil {
-            let frame = sidebar.convert(sidebar.bounds, to: view)
-            if frame.intersects(view.bounds), frame.maxX > area.minX, frame.minX <= view.bounds.minX + 1 {
-                area = CGRect(x: frame.maxX, y: area.minY, width: max(area.maxX - frame.maxX, 0), height: area.height)
-            }
-        }
-        return area
-    }
+    private var visibleArea: CGRect { areaClearOfSidebar }
 
     // MARK: Items
 
@@ -160,6 +156,49 @@ final class BoardViewController: UIViewController, UIScrollViewDelegate {
     private func itemChanged(_ item: BoardItem) {
         guard let index = board.items.firstIndex(where: { $0.id == item.id }) else { return }
         board.items[index] = item
+        itemsBeforeArrange = nil
+        scheduleSave()
+    }
+
+    // MARK: Arranging
+
+    private func arrangeMenuElements() -> [UIMenuElement] {
+        guard board.items.count > 1 else { return [] }
+        var elements: [UIMenuElement] = [UIMenu(title: "Arrange", subtitle: "Line images up neatly",
+                                                image: UIImage(systemName: "square.grid.2x2"), children: BoardArrangement.allCases.map { style in
+            UIAction(title: style.title, subtitle: style.subtitle, image: UIImage(systemName: style.symbol)) { [weak self] _ in
+                self?.arrange(style)
+            }
+        })]
+        if itemsBeforeArrange != nil {
+            elements.append(UIAction(title: "Undo Arrange", subtitle: "Put images back where they were",
+                                     image: UIImage(systemName: "arrow.uturn.backward")) { [weak self] _ in self?.undoArrange() })
+        }
+        return elements
+    }
+
+    private func arrange(_ style: BoardArrangement) {
+        let previous = board.items
+        let aspects = Dictionary(uniqueKeysWithValues: itemViews.map { ($0.key, Double($0.value.aspect)) })
+        apply(style.apply(to: board.items, aspects: aspects))
+        itemsBeforeArrange = previous
+    }
+
+    private func undoArrange() {
+        guard let previous = itemsBeforeArrange else { return }
+        apply(previous)
+        itemsBeforeArrange = nil
+    }
+
+    /// Moves every image to its new place in one animation, then shows the whole board.
+    private func apply(_ items: [BoardItem]) {
+        let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        board.items = board.items.map { byID[$0.id] ?? $0 }
+        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0) {
+            for item in self.board.items { self.itemViews[item.id]?.setItem(item) }
+        } completion: { _ in
+            self.fitAll(animated: true)
+        }
         scheduleSave()
     }
 
@@ -350,7 +389,8 @@ final class BoardItemView: UIView, UIGestureRecognizerDelegate, UIContextMenuInt
     var menuProvider: ((BoardItemView) -> UIMenu?)?
 
     private let imageView = UIImageView()
-    private var aspect: CGFloat = 1
+    /// Height / width of the image (1 until its size is known).
+    private(set) var aspect: CGFloat = 1
     private var token: LoadToken?
 
     var image: UIImage? { imageView.image }
@@ -426,6 +466,12 @@ final class BoardItemView: UIView, UIGestureRecognizerDelegate, UIContextMenuInt
         center = CGPoint(x: item.centerX, y: item.centerY)
         transform = CGAffineTransform(rotationAngle: CGFloat(item.rotation))
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: 6).cgPath
+    }
+
+    /// New geometry from outside (arranging); doesn't report back through `onChange`.
+    func setItem(_ item: BoardItem) {
+        self.item = item
+        applyGeometry()
     }
 
     func resetRotation() {

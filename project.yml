@@ -24,7 +24,9 @@ targets:
         CFBundleDisplayName: OpenViewer
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        UILaunchScreen: {}
+        # Same near-black as the app's dark ground (the default appearance), so launch doesn't flash white.
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         UIApplicationSupportsIndirectInputEvents: true
         UIRequiresFullScreen: false
         LSSupportsOpeningDocumentsInPlace: true

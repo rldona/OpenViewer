@@ -39,6 +39,11 @@ final class SidebarViewController: UIViewController {
     private var dataSource: UICollectionViewDiffableDataSource<Section, Row>!
     private var selectedRow: Row?
     private var didAttemptRestore = false
+    /// Favourites whose files can be reached now (nil until counted). Favourites inside a folder
+    /// that was removed from the sidebar, or on a disconnected drive, can't be shown, so they don't count.
+    private var reachableFavorites: Int?
+    private var favoritesCountInputs: [String] = []
+    private var favoritesCountGeneration = 0
 
     init(detailNavigation: UINavigationController?) {
         self.detailNavigation = detailNavigation
@@ -53,6 +58,7 @@ final class SidebarViewController: UIViewController {
 
     /// Opens a folder directly (e.g. in a window opened with "Open in New Window").
     func openFolder(_ url: URL) {
+        didAttemptRestore = true
         ScopedAccess.begin(url, owner: self)
         if let bookmark = BookmarkStore.shared.items.first(where: { BookmarkStore.shared.resolve($0)?.standardizedFileURL == url.standardizedFileURL }) {
             open(.recent(bookmark), animated: false)
@@ -210,6 +216,16 @@ final class SidebarViewController: UIViewController {
         }
     }
 
+    /// Reopens the last folder before the window first appears, so launch doesn't flash the
+    /// "Open a folder" screen. A folder that can't be reached is left to `viewDidAppear`, which
+    /// can show why.
+    func restoreLastFolderBeforeLaunch() {
+        guard !didAttemptRestore, Settings.reopenLastFolder, let last = BookmarkStore.shared.items.first,
+              BookmarkStore.shared.resolve(last) != nil else { return }
+        didAttemptRestore = true
+        open(.recent(last), animated: false)
+    }
+
     override var keyCommands: [UIKeyCommand]? {
         [UIKeyCommand(title: "Open Folder…", action: #selector(pickFolder), input: "o", modifierFlags: .command)]
     }
@@ -231,14 +247,17 @@ final class SidebarViewController: UIViewController {
     }
 
     private func reload() {
+        // Opening the last folder before launch happens before the list exists; viewWillAppear fills it.
+        guard isViewLoaded else { return }
         let contents: [(Section, [Row])] = [
-            (.library, [.favorites(FavoritesStore.shared.count), .appDocuments]),
+            (.library, [.favorites(reachableFavorites ?? 0), .appDocuments]),
             (.pinned, FavoriteFoldersStore.shared.items.map(Row.favoriteFolder)),
             (.smartAlbums, SmartAlbumStore.shared.items.map(Row.smartAlbum)),
             (.boards, BoardStore.shared.boards.map { Row.board($0.id, $0.name, $0.items.count) }),
             (.tags, TagStore.shared.counts.map { Row.tag($0.tag, $0.count) }),
             (.recent, BookmarkStore.shared.items.map(Row.recent)),
         ].filter { !$0.1.isEmpty }
+        countReachableFavoritesIfNeeded()
 
         let sections = contents.map(\.0)
         if dataSource.snapshot().sectionIdentifiers != sections {
@@ -421,8 +440,33 @@ final class SidebarViewController: UIViewController {
     }
 
     private func beginAccessToRememberedFolders() {
-        for bookmark in BookmarkStore.shared.items {
-            if let url = BookmarkStore.shared.resolve(bookmark) { ScopedAccess.begin(url, owner: self) }
+        for url in Self.rememberedFolders() { ScopedAccess.begin(url, owner: self) }
+    }
+
+    /// Recent and pinned folders: every place the app was given access to.
+    private static func rememberedFolders() -> [URL] {
+        BookmarkStore.shared.items.compactMap(BookmarkStore.shared.resolve)
+            + FavoriteFoldersStore.shared.items.map(FavoriteFoldersStore.shared.resolve)
+    }
+
+    /// Counts in the background, and only when favourites or remembered folders changed.
+    private func countReachableFavoritesIfNeeded() {
+        let favorites = FavoritesStore.shared.urls
+        let folders = Self.rememberedFolders()
+        let inputs = [String(favorites.map(\.path).hashValue)] + folders.map(\.path).sorted()
+        guard inputs != favoritesCountInputs else { return }
+        favoritesCountInputs = inputs
+        favoritesCountGeneration += 1
+        let generation = favoritesCountGeneration
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let accessed = folders.filter { $0.startAccessingSecurityScopedResource() }
+            let count = favorites.reduce(0) { $0 + (FileManager.default.fileExists(atPath: $1.path) ? 1 : 0) }
+            accessed.forEach { $0.stopAccessingSecurityScopedResource() }
+            DispatchQueue.main.async {
+                guard let self, generation == self.favoritesCountGeneration, count != self.reachableFavorites else { return }
+                self.reachableFavorites = count
+                self.reload()
+            }
         }
     }
 
@@ -495,6 +539,8 @@ extension SidebarViewController: UIDocumentPickerDelegate {
 /// Shown in the detail column until a location is chosen.
 final class EmptyLibraryViewController: UIViewController {
     var onOpenFolder: (() -> Void)?
+    private var centerX: NSLayoutConstraint!
+    private var centerY: NSLayoutConstraint!
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -522,9 +568,27 @@ final class EmptyLibraryViewController: UIViewController {
         stack.setCustomSpacing(24, after: detail)
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
+        // Centred in the part of the screen the floating sidebar leaves free.
+        centerX = stack.centerXAnchor.constraint(equalTo: view.leadingAnchor)
+        centerY = stack.centerYAnchor.constraint(equalTo: view.topAnchor)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            centerX, centerY,
+            stack.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -32),
         ])
+        detail.numberOfLines = 0
+        detail.textAlignment = .center
+        observeSidebarChanges { [weak self] in
+            UIView.animate(withDuration: 0.25) {
+                self?.view.setNeedsLayout()
+                self?.view.layoutIfNeeded()
+            }
+        }
+    }
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        let area = areaClearOfSidebar
+        centerX.constant = area.midX
+        centerY.constant = area.midY
     }
 }

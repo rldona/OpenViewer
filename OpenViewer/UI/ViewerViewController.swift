@@ -27,6 +27,8 @@ final class ViewerViewController: UIViewController {
     private let shareButton = UIButton(type: .system)
     private let favoriteButton = UIButton(type: .system)
     private let animateButton = UIButton(type: .system)
+    /// Frame count of animated files (GIF, APNG…), read in the background once per file.
+    private var animatedFrameCounts: [URL: Int] = [:]
     private let moreButton = UIButton(type: .system)
     private let favoriteHUD = UIImageView()
     private let toastLabel = PaddedLabel()
@@ -302,9 +304,30 @@ final class ViewerViewController: UIViewController {
         if infoVisible { infoPanel.show(item) }
         updateFavoriteButton()
         ExternalDisplay.shared.show(item)
-        // Only numbered names ("walk_03.png") can be part of a frame sequence.
-        animateButton.isHidden = FrameSequence.stem(of: item.name) == nil
+        updateAnimateButton(for: item)
         preloadNeighbours()
+    }
+
+    /// Shown for numbered names ("walk_03.png", part of a frame sequence) and for files with
+    /// frames of their own (animated GIF, APNG, WebP…).
+    private func updateAnimateButton(for item: ImageItem) {
+        let isSequence = FrameSequence.stem(of: item.name) != nil
+        if let count = animatedFrameCounts[item.url] {
+            animateButton.isHidden = !isSequence && count < 2
+            return
+        }
+        animateButton.isHidden = !isSequence
+        let url = item.url
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let count = AnimatedImage.frameCount(of: url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.animatedFrameCounts[url] = count
+                if self.items.indices.contains(self.currentIndex), self.items[self.currentIndex].url == url {
+                    self.animateButton.isHidden = !isSequence && count < 2
+                }
+            }
+        }
     }
 
     /// Decodes the next two and the previous image so paging feels instant.
@@ -476,14 +499,19 @@ final class ViewerViewController: UIViewController {
         }
     }
 
-    /// Plays the numbered frames this image belongs to as an animation.
+    /// Plays this file's own frames (animated GIF, APNG…), or else the numbered frames it belongs to.
     @objc private func playFrames() {
         guard !items.isEmpty else { return }
         stopSlideshow()
         let item = items[currentIndex]
+        let frameCount = animatedFrameCounts[item.url] ?? AnimatedImage.frameCount(of: item.url)
+        if frameCount > 1 {
+            present(FlipbookViewController(animatedFile: item, frameCount: frameCount), animated: true)
+            return
+        }
         let frames = FrameSequence.frames(around: item, in: items)
         guard frames.count > 1 else {
-            showToast("No numbered frames next to this image")
+            showToast("This image has no frames to play")
             return
         }
         present(FlipbookViewController(frames: frames, startAt: frames.firstIndex(of: item) ?? 0), animated: true)

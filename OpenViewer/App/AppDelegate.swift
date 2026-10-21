@@ -53,16 +53,18 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         split.setViewController(detail, for: .secondary)
         split.setViewController(compact, for: .compact)
         window.rootViewController = split
-        window.tintColor = Theme.accent
-        window.overrideUserInterfaceStyle = Appearance.current.style
-        window.makeKeyAndVisible()
-        self.window = window
-
+        // Fill the detail column before the first frame, so launch doesn't flash the "Open a folder" screen.
         // A window opened with "Open in New Window" starts in its folder.
         if let url = connectionOptions.userActivities.lazy.compactMap(WindowOpener.folder(from:)).first {
             sidebar.openFolder(url)
             windowScene.title = url.lastPathComponent
+        } else {
+            sidebar.restoreLastFolderBeforeLaunch()
         }
+        window.tintColor = Theme.accent
+        window.overrideUserInterfaceStyle = Appearance.current.style
+        window.makeKeyAndVisible()
+        self.window = window
     }
 }
 

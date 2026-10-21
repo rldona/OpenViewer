@@ -198,16 +198,18 @@ final class ImageAnalysisStore {
 
     static let didChange = Notification.Name("OpenViewer.analysisDidChange")
 
-    private var records: [String: ImageAnalysisRecord] = [:]
+    /// Read on first use (the file can hold tens of thousands of records). Not a `lazy var`:
+    /// mutating one copies the whole dictionary on every write.
+    private var storage: [String: ImageAnalysisRecord]?
+    private var records: [String: ImageAnalysisRecord] {
+        if storage == nil { storage = Self.read(from: fileURL) }
+        return storage!
+    }
     private let fileURL: URL?
     private var saveScheduled = false
 
     init(fileURL: URL?) {
         self.fileURL = fileURL
-        if let fileURL, let data = try? Data(contentsOf: fileURL),
-           let stored = try? PropertyListDecoder().decode([String: ImageAnalysisRecord].self, from: data) {
-            records = stored
-        }
     }
 
     /// The record for `item`, only if it still describes the file as it is now.
@@ -240,7 +242,8 @@ final class ImageAnalysisStore {
     func update(_ item: ImageItem, _ change: (inout ImageAnalysisRecord) -> Void) {
         var record = record(for: item) ?? ImageAnalysisRecord(modified: item.modified, size: item.size)
         change(&record)
-        records[FavoritesStore.key(item.url)] = record
+        _ = records
+        storage![FavoritesStore.key(item.url)] = record
         scheduleSave()
     }
 
@@ -255,15 +258,80 @@ final class ImageAnalysisStore {
     }
 
     func save() {
-        guard let fileURL else { return }
-        let encoder = PropertyListEncoder()
-        encoder.outputFormat = .binary
         let snapshot = records
-        DispatchQueue.global(qos: .utility).async {
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: fileURL, options: .atomic)
+        DispatchQueue.global(qos: .utility).async { [fileURL] in Self.write(snapshot, to: fileURL) }
+    }
+
+    /// Writes synchronously (tests).
+    func saveNowForTesting() { Self.write(records, to: fileURL) }
+
+    private static let magic = "OVIA"
+    private static let formatVersion: UInt32 = 1
+
+    private static func write(_ records: [String: ImageAnalysisRecord], to fileURL: URL?) {
+        guard let fileURL else { return }
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? encode(records).write(to: fileURL, options: .atomic)
+    }
+
+    private static func read(from fileURL: URL?) -> [String: ImageAnalysisRecord] {
+        guard let fileURL, let data = try? Data(contentsOf: fileURL) else { return [:] }
+        if let records = decode(data) { return records }
+        // Earlier versions stored a property list.
+        return (try? PropertyListDecoder().decode([String: ImageAnalysisRecord].self, from: data)) ?? [:]
+    }
+
+    static func encode(_ records: [String: ImageAnalysisRecord]) -> Data {
+        var writer = BinaryWriter(magic: magic, version: formatVersion)
+        writer.writeCount(records.count)
+        for (key, record) in records {
+            writer.write(key)
+            writer.write(record.modified.timeIntervalSince1970)
+            writer.write(Int64(record.size))
+            var flags: UInt8 = 0
+            if record.palette != nil { flags |= 1 }
+            if record.weights != nil { flags |= 2 }
+            if record.hash != nil { flags |= 4 }
+            if record.vhash != nil { flags |= 8 }
+            if record.families != nil { flags |= 16 }
+            if record.text != nil { flags |= 32 }
+            writer.write(flags)
+            if let palette = record.palette {
+                writer.writeCount(palette.count)
+                palette.forEach { writer.write($0) }
+            }
+            if let weights = record.weights {
+                writer.writeCount(weights.count)
+                weights.forEach { writer.write($0) }
+            }
+            if let hash = record.hash { writer.write(hash) }
+            if let vhash = record.vhash { writer.write(vhash) }
+            if let families = record.families { writer.write(families) }
+            if let text = record.text { writer.write(text) }
         }
+        return writer.data
+    }
+
+    static func decode(_ data: Data) -> [String: ImageAnalysisRecord]? {
+        guard var reader = BinaryReader(data: data, magic: magic, version: formatVersion) else { return nil }
+        let count = reader.readCount()
+        var records: [String: ImageAnalysisRecord] = [:]
+        records.reserveCapacity(count)
+        for _ in 0..<count {
+            let key = reader.readString()
+            var record = ImageAnalysisRecord(modified: Date(timeIntervalSince1970: reader.readDouble()),
+                                             size: Int(reader.read(Int64.self)))
+            let flags = reader.read(UInt8.self)
+            if flags & 1 != 0 { record.palette = (0..<reader.readCount()).map { _ in reader.read(UInt32.self) } }
+            if flags & 2 != 0 { record.weights = (0..<reader.readCount()).map { _ in reader.readFloat() } }
+            if flags & 4 != 0 { record.hash = reader.read(UInt64.self) }
+            if flags & 8 != 0 { record.vhash = reader.read(UInt64.self) }
+            if flags & 16 != 0 { record.families = reader.read(UInt16.self) }
+            if flags & 32 != 0 { record.text = reader.readString() }
+            guard reader.isValid else { return nil }
+            records[key] = record
+        }
+        return records
     }
 }
 

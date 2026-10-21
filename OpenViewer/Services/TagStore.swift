@@ -43,8 +43,11 @@ final class TagStore {
         }
     }
 
-    func tags(for url: URL) -> [TagColor] {
-        (entries[FavoritesStore.key(url)] ?? []).compactMap(TagColor.init(rawValue:))
+    func tags(for url: URL) -> [TagColor] { tags(forKey: FavoritesStore.key(url)) }
+
+    func tags(forKey key: String) -> [TagColor] {
+        guard let raw = entries[key] else { return [] }
+        return raw.compactMap(TagColor.init(rawValue:))
     }
 
     func has(_ tag: TagColor, _ url: URL) -> Bool { tags(for: url).contains(tag) }
